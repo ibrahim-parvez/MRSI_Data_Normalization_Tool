@@ -5,6 +5,7 @@ from openpyxl.worksheet.views import Selection
 from openpyxl.styles import PatternFill
 from openpyxl.formatting.rule import CellIsRule
 import settings
+from utils import embed_settings_popup
 
 def _detect_decimal_places_from_format(fmt: str):
     """
@@ -29,14 +30,23 @@ def _detect_decimal_places_from_format(fmt: str):
 def step3_last6_carbonate(file_path):
     """
     Step 3: LAST 6 — Fully Refactored
-    Copies rows from 'To Sort' where column Q == "last 6" and
-    preserves ALL formatting (fonts, fills, borders, alignment,
-    number formats, merged cells, row heights, column widths).
-    Applies decimal display rules without rounding stored values.
+    Copies rows from 'To Sort' based on the calculation mode setting.
+    - If "Last 6": Copies rows where col Q is "last 6".
+    - If "Last 6 Outliers Excl.": Copies rows where col Q is "outliers excl.".
+    Preserves all formatting.
     """
 
     source_sheet = "To Sort_DNT"
     new_sheet_name = "Last 6_DNT"
+
+    # --- 1. Determine Filter Target based on Settings ---
+    calc_mode = settings.get_setting("CALC_MODE_STEP3")
+    if calc_mode == "Last 6 Outliers Excl.":
+        filter_target = "last 6 outliers excl."
+    else:
+        filter_target = "last 6"
+        
+    print(f"   ℹ️ Carbonate Step 3 Mode: {calc_mode} -> Filtering for '{filter_target}'")
 
     wb = load_workbook(file_path, data_only=False)
 
@@ -106,7 +116,7 @@ def step3_last6_carbonate(file_path):
         pass
 
     # ------------------------------------------------------------
-    # COPY ONLY ROWS WHERE COLUMN Q (17) == "last 6"
+    # COPY ONLY ROWS MATCHING THE FILTER TARGET
     # ------------------------------------------------------------
     col_q = 17
     new_row = 2
@@ -114,7 +124,8 @@ def step3_last6_carbonate(file_path):
 
     for r in range(2, max_row + 1):
         v = ws_source.cell(row=r, column=col_q).value
-        if str(v).strip().lower() != "last 6":
+        # Check against dynamic filter target
+        if str(v).strip().lower() != filter_target:
             continue
 
         mapping_new_to_src[new_row] = r
@@ -172,12 +183,12 @@ def step3_last6_carbonate(file_path):
                 else:
                     tgt.number_format = fmt_three if dec >= 3 else fmt_two
 
-    # -------------------- CONDITIONAL FORMATTING FOR “LAST 6” --------------------
+    # -------------------- CONDITIONAL FORMATTING --------------------
     threshold = settings.get_setting("STDEV_THRESHOLD")
 
     red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 
-    # Column S (19)
+    # Column S (19) - Carbon Stdev
     ws_new.conditional_formatting.add(
         f"S2:S{ws_new.max_row}",
         CellIsRule(
@@ -187,7 +198,7 @@ def step3_last6_carbonate(file_path):
         )
     )
 
-    # Column V (22)
+    # Column V (22) - Oxygen Stdev
     ws_new.conditional_formatting.add(
         f"V2:V{ws_new.max_row}",
         CellIsRule(
@@ -196,7 +207,6 @@ def step3_last6_carbonate(file_path):
             fill=red_fill
         )
     )
-
 
     # ------------------------------------------------------------
     # SELECT A1, MAKE SHEET ACTIVE
@@ -210,6 +220,12 @@ def step3_last6_carbonate(file_path):
     ws_new.sheet_view.tabSelected = True
     wb.active = wb.index(ws_new)
     ws_new.sheet_view.selection = [Selection(activeCell="A1", sqref="A1")]
+
+    # Add Settings Popup Comment
+    embed_settings_popup(ws_new, "AB1")
+
+    # Set column widths
+    ws_new.column_dimensions["Q"].width = 16 
 
     wb.save(file_path)
     print(f"Step 3: LAST 6 completed on {file_path}")

@@ -1,26 +1,20 @@
 import os
-from copy import copy, deepcopy
+import re
+from copy import copy
 from openpyxl import load_workbook
 from openpyxl.worksheet.views import Selection
 from openpyxl.utils import get_column_letter
-from openpyxl.cell.rich_text import CellRichText, TextBlock
-# Import CellIsRule, FormulaRule to ensure all imports are available for downstream use
-from openpyxl.formatting.rule import CellIsRule, FormulaRule 
+from utils import embed_settings_popup
 
-def _is_formula_cell(cell):
-    """Return True if the cell is a formula."""
-    try:
-        if getattr(cell, "data_type", None) == "f":
-            return True
-        val = cell.value
-        return isinstance(val, str) and val.startswith("=")
-    except Exception:
-        return False
-
+# --- Helper: Force Excel to Calculate Formulas ---
 def _try_refresh_with_xlwings(path):
+    """
+    Opens the workbook in the background using Excel, 
+    calculates all formulas, and saves it. 
+    """
     try:
         import xlwings as xw
-    except Exception:
+    except ImportError:
         return False
 
     app = None
@@ -28,31 +22,17 @@ def _try_refresh_with_xlwings(path):
     try:
         app = xw.App(visible=False, add_book=False)
         book = app.books.open(os.path.abspath(path))
-        try:
-            book.app.api.Application.CalculateFull()
-        except Exception:
-            try:
-                book.app.api.Application.Calculate()
-            except Exception:
-                try:
-                    book.app.calculate()
-                except Exception:
-                    pass
+        book.app.api.Application.CalculateFull()
         book.save()
         book.close()
         app.quit()
         return True
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ xlwings refresh failed: {e}")
         try:
-            if book is not None:
-                book.close()
-        except Exception:
-            pass
-        try:
-            if app is not None:
-                app.quit()
-        except Exception:
-            pass
+            if book: book.close()
+            if app: app.quit()
+        except: pass
         return False
 
 def step7_report_water(file_path):
@@ -60,192 +40,187 @@ def step7_report_water(file_path):
     new_sheet_name = "Report_DNT"
 
     if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
+        print(f"❌ File not found: {file_path}")
+        return
 
+    # 1. Force Calculation
+    print("⏳ Recalculating formulas with Excel...")
+    _try_refresh_with_xlwings(file_path)
+
+    # 2. Load Workbooks
+    print("Loading workbook (this may take a moment)...")
     wb_fmt = load_workbook(file_path, data_only=False)
     wb_val = load_workbook(file_path, data_only=True)
 
     if source_sheet not in wb_fmt.sheetnames:
-        raise ValueError(f"Sheet '{source_sheet}' not found.")
+        print(f"❌ Sheet '{source_sheet}' not found.")
+        return
 
     ws_fmt = wb_fmt[source_sheet]
     ws_val = wb_val[source_sheet]
 
-    # --- Helper: Check for Silver/Gray #C0C0C0 ---
-    def _cell_rgb_upper(cell):
-        try:
-            fg = getattr(cell.fill, "fgColor", None)
-            if fg is not None:
-                rgb = getattr(fg, "rgb", None)
-                if rgb:
-                    return str(rgb).upper()
-            sc = getattr(cell.fill, "start_color", None)
-            if sc is not None:
-                rgb2 = getattr(sc, "rgb", None)
-                if rgb2:
-                    return str(rgb2).upper()
-        except Exception:
-            pass
-        return None
-
-    def _is_grayC0C0C0(cell):
-        rgb = _cell_rgb_upper(cell)
-        # Check specifically for C0C0C0 (often comes as FFC0C0C0 or 00C0C0C0)
-        return bool(rgb and rgb.endswith("C0C0C0"))
-
-    # --- 1. Define Columns (A-C and S-Y) ---
-    # A=1, B=2, C=3
-    # S=19, T=20, U=21, V=22, W=23, X=24, Y=25
-    source_cols = [1, 2, 3] + list(range(19, 26)) 
-
-    # --- 2. Check for Formula Updates ---
-    # We check a small sample to see if xlwings refresh is needed
-    needs_refresh = False
-    # Check specifically in the header region (row 16-18) or just below
-    check_rows = list(range(16, 19))
-    for r in check_rows:
-        for c in source_cols:
-            src = ws_fmt.cell(row=r, column=c)
-            valcell = ws_val.cell(row=r, column=c)
-            if _is_formula_cell(src) and (valcell.value is None):
-                needs_refresh = True
+    # --- 3. Determine Header Location ---
+    # We look for the "main" header row (usually contains "δ¹⁸O SMOW" or via freeze pane)
+    header_main_row = None
+    
+    # Strategy A: Freeze Pane (often points to the first data row, so headers are above)
+    freeze_loc = ws_fmt.freeze_panes
+    if freeze_loc:
+        match = re.search(r"(\d+)", str(freeze_loc))
+        if match:
+            # Usually freeze is at the first data row. 
+            # If freeze is row 22, headers are usually 20, 21.
+            header_main_row = int(match.group(1)) - 1
+    
+    # Strategy B: Fallback Search
+    if not header_main_row or header_main_row < 2:
+        for r in range(1, 100):
+            val_v = ws_val.cell(row=r, column=22).value 
+            if val_v == "δ¹⁸O SMOW":
+                header_main_row = r 
                 break
-        if needs_refresh:
+    
+    if not header_main_row: 
+        header_main_row = 20 # Fallback default
+
+    # The user wants the row ABOVE the main header + the main header
+    header_rows = [header_main_row - 1, header_main_row]
+    print(f"ℹ️ Headers identified at rows {header_rows}")
+
+    # --- 4. Locate Data Start (Grey Row Separation) ---
+    # We look for 2 consecutive rows with #C0C0C0 to denote the end of standards
+    data_start_row = None
+    consecutive_grey = 0
+    
+    # Start searching below headers
+    search_start = header_rows[-1] + 1
+    
+    for r in range(search_start, ws_fmt.max_row + 1):
+        # Check Column B (2) for the grey color. 
+        # Standard grey is often "FFC0C0C0" or Theme index with tint.
+        # We check simply if "C0C0C0" is in the hex string.
+        cell = ws_fmt.cell(row=r, column=2)
+        color_hex = str(cell.fill.start_color.rgb) if cell.fill.start_color else ""
+        
+        if "C0C0C0" in color_hex.upper():
+            consecutive_grey += 1
+        else:
+            consecutive_grey = 0
+        
+        if consecutive_grey == 2:
+            # Found the separator! The data starts immediately after these 2 rows.
+            data_start_row = r + 1
             break
+            
+    if not data_start_row:
+        print("⚠️ Could not find the grey separator rows (#C0C0C0). Defaulting to copying all rows after headers.")
+        data_start_row = header_rows[-1] + 1
+    else:
+        print(f"ℹ️ Found grey separator. Data starts at row {data_start_row}")
 
-    if needs_refresh:
-        refreshed = _try_refresh_with_xlwings(file_path)
-        if refreshed:
-            wb_fmt = load_workbook(file_path, data_only=False)
-            wb_val = load_workbook(file_path, data_only=True)
-            ws_fmt = wb_fmt[source_sheet]
-            ws_val = wb_val[source_sheet]
-
-    # --- 3. Prepare New Sheet ---
+    # --- 5. Prepare New Sheet ---
     if new_sheet_name in wb_fmt.sheetnames:
         del wb_fmt[new_sheet_name]
 
     ws_new = wb_fmt.create_sheet(new_sheet_name, index=wb_fmt.index(ws_fmt))
 
-    # Column Mapping: Maps Source Column Index -> New Sequential Column Index
-    # e.g. Col 1 -> 1, Col 19 -> 4
-    mapping = {src_col: idx for idx, src_col in enumerate(source_cols, start=1)}
+    # --- 6. Define Column Mapping (With Blank D) ---
+    # Source: A(1), B(2), C(3) ... then S(19) onwards
+    # Dest:   A(1), B(2), C(3), [D-BLANK], E(5), F(6)...
+    
+    cols_left = [1, 2, 3] # A, B, C
+    cols_right = list(range(19, ws_fmt.max_column + 1)) # S onwards
+    
+    mapping = {}
+    
+    # Map Left Columns (Direct Copy)
+    for c in cols_left:
+        mapping[c] = c 
+        
+    # Map Right Columns (Shifted to start at E/5)
+    dest_col_idx = 5
+    for c in cols_right:
+        mapping[c] = dest_col_idx
+        dest_col_idx += 1
 
-    # --- 4. Processing Function (Copy Logic) ---
-    def copy_row(src_row_idx, dest_row_idx):
-        """Copies specific columns from src_row to dest_row."""
-        for src_col in source_cols:
-            new_col = mapping[src_col]
+    # --- 7. Copy Execution ---
+    current_dest_row = 1
+    
+    # Helper to copy a row
+    def copy_row(src_row_idx):
+        nonlocal current_dest_row
+        
+        # Check if source row is empty (skip empty rows in data section)
+        if src_row_idx >= data_start_row:
+             # Just check the columns we care about
+             is_empty = True
+             for c_chk in (cols_left + cols_right):
+                 if ws_val.cell(row=src_row_idx, column=c_chk).value is not None:
+                     is_empty = False
+                     break
+             if is_empty: return
+
+        # Perform Copy
+        for src_col, dst_col in mapping.items():
             src_cell_fmt = ws_fmt.cell(row=src_row_idx, column=src_col)
             src_cell_val = ws_val.cell(row=src_row_idx, column=src_col)
-            dst = ws_new.cell(row=dest_row_idx, column=new_col)
+            dst_cell = ws_new.cell(row=current_dest_row, column=dst_col)
 
-            # Value transfer
-            value = None
-            if src_cell_val.value is not None:
-                value = src_cell_val.value
-            elif not _is_formula_cell(src_cell_fmt):
-                value = src_cell_fmt.value
+            # Copy Value
+            val = src_cell_val.value
+            if val is None: val = src_cell_fmt.value
+            dst_cell.value = val
 
-            # Rich Text
-            try:
-                if hasattr(src_cell_fmt, "rich_text") and src_cell_fmt.rich_text:
-                    rt = CellRichText()
-                    for block in src_cell_fmt.rich_text:
-                        if isinstance(block, TextBlock):
-                            rt.append(deepcopy(block))
-                    dst.rich_text = rt
-                else:
-                    dst.value = value
-            except Exception:
-                dst.value = value
+            # Copy Styles
+            if src_cell_fmt.has_style:
+                dst_cell.font = copy(src_cell_fmt.font)
+                dst_cell.border = copy(src_cell_fmt.border)
+                dst_cell.fill = copy(src_cell_fmt.fill)
+                dst_cell.number_format = copy(src_cell_fmt.number_format)
+                dst_cell.alignment = copy(src_cell_fmt.alignment)
+                dst_cell.protection = copy(src_cell_fmt.protection)
 
-            # Comments
-            try:
-                if getattr(src_cell_fmt, "comment", None) is not None:
-                    dst.comment = deepcopy(src_cell_fmt.comment)
-            except Exception:
-                pass
-
-            # Style (Font, Border, Fill, NumberFormat, Alignment, Protection)
-            try:
-                if src_cell_fmt.has_style:
-                    dst.font = copy(src_cell_fmt.font)
-                    dst.border = copy(src_cell_fmt.border)
-                    dst.fill = copy(src_cell_fmt.fill)
-                    dst.number_format = src_cell_fmt.number_format
-                    dst.protection = copy(src_cell_fmt.protection)
-                    dst.alignment = copy(src_cell_fmt.alignment)
-            except Exception:
-                pass
-
-        # Row Height
-        try:
-            rd = ws_fmt.row_dimensions.get(src_row_idx)
-            if rd is not None and getattr(rd, "height", None) is not None:
-                ws_new.row_dimensions[dest_row_idx].height = rd.height
-        except Exception:
-            pass
-
-    # --- 5. EXECUTION ---
-    
-    current_write_row = 1
-
-    # STEP A: Copy Headers (Rows 16, 17, 18)
-    for r in range(16, 19):
-        copy_row(r, current_write_row)
-        current_write_row += 1
-
-    # STEP B: Find the 2-Row Gray Separator (#C0C0C0)
-    # We search starting from row 19 downwards to find the silver separator
-    separator_start_row = None
-    search_limit = min(ws_fmt.max_row, 100) # Search reasonable range
-
-    for r in range(19, search_limit):
-        # Check if a significant number of columns in our range are C0C0C0
-        # checking cols 1-3 is usually sufficient for a full band
-        is_gray_r = _is_grayC0C0C0(ws_fmt.cell(row=r, column=1))
-        is_gray_r1 = _is_grayC0C0C0(ws_fmt.cell(row=r+1, column=1))
+        # Copy Row Height
+        rd = ws_fmt.row_dimensions.get(src_row_idx)
+        if rd and rd.height is not None:
+            ws_new.row_dimensions[current_dest_row].height = rd.height
         
-        if is_gray_r and is_gray_r1:
-            separator_start_row = r
-            break
+        current_dest_row += 1
+
+    # A. Copy Headers
+    for h_row in header_rows:
+        copy_row(h_row)
+
+    current_dest_row += 2
+
+    # B. Copy Data (After Grey Rows)
+    for d_row in range(data_start_row, ws_fmt.max_row + 1):
+        copy_row(d_row)
+
+    # --- 8. Final Formatting ---
+    # Adjust Column Widths
+    for src_col, dst_col in mapping.items():
+        src_letter = get_column_letter(src_col)
+        dst_letter = get_column_letter(dst_col)
+        cd = ws_fmt.column_dimensions.get(src_letter)
+        if cd and cd.width:
+            ws_new.column_dimensions[dst_letter].width = cd.width
+        else:
+            ws_new.column_dimensions[dst_letter].width = 13
     
-    if separator_start_row is None:
-        print("Warning: Could not find the #C0C0C0 separator. Report might be incomplete.")
-        # Fallback: If no separator found, maybe just continue from 19?
-        data_start_row = 19 
-    else:
-        # User requested: "start from under the 2 rows"
-        # Separator is at r and r+1. Data starts at r+2.
-        data_start_row = separator_start_row + 2
+    # Set Blank Column D width to be narrow (optional aesthetic tweak)
+    ws_new.column_dimensions['D'].width = 10
 
-    # STEP C: Copy Data Body
-    # Copy from data_start_row to end of sheet
-    for r in range(data_start_row, ws_fmt.max_row + 1):
-        copy_row(r, current_write_row)
-        current_write_row += 1
-
-    # --- 6. Final Polish (Column Widths & View) ---
-    for src_col, new_col in mapping.items():
-        try:
-            src_letter = get_column_letter(src_col)
-            new_letter = get_column_letter(new_col)
-            cd = ws_fmt.column_dimensions.get(src_letter)
-            if cd is not None and getattr(cd, "width", None) is not None:
-                ws_new.column_dimensions[new_letter].width = cd.width
-        except Exception:
-            pass
-
-    # Set View to A1
-    for s in wb_fmt.worksheets:
-        try:
-            s.sheet_view.tabSelected = False
-        except Exception:
-            pass
+    # Freeze Panes: D3 (Rows 1-2 Frozen, Columns A-C Frozen)
+    ws_new.freeze_panes = "D3"
+    
     ws_new.sheet_view.tabSelected = True
+    ws_fmt.sheet_view.tabSelected = False
     wb_fmt.active = wb_fmt.index(ws_new)
     ws_new.sheet_view.selection = [Selection(activeCell="A1", sqref="A1")]
 
+    # Add Settings Popup Comment
+    embed_settings_popup(ws_new, "A1")
+
     wb_fmt.save(file_path)
-    print(f"Step 7: Water Report completed on {file_path}")
+    print(f"✅ Step 7: Water Report completed on {file_path}")

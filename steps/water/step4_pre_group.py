@@ -9,6 +9,7 @@ import numpy as np
 import re
 from openpyxl.formatting.rule import CellIsRule 
 import settings 
+from utils import embed_settings_popup
 
 # Define the error fill for Conditional Formatting
 fill_error = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
@@ -237,6 +238,12 @@ def step4_pre_group_water(file_path: str):
     new_ws.sheet_view.tabSelected = True
     wb.active = wb.index(new_ws)
     new_ws.sheet_view.selection = [Selection(activeCell="A1", sqref="A1")]
+
+    # Add Settings Popup Comment
+    embed_settings_popup(new_ws, "R1")
+
+    # Set column widths
+    new_ws.column_dimensions["J"].width = 16 
 
     wb.save(file_path)
     print(f"✅ Step 4: Pre-Grouping sheet '{new_sheet_name}' created.")

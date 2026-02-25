@@ -6,20 +6,31 @@ from openpyxl.styles import PatternFill, Font
 from openpyxl.formatting.rule import CellIsRule
 from copy import copy
 import settings
+from utils import embed_settings_popup
 
 def step3_last6_water(file_path: str):
     """
     Step 3: Last 6 (Water)
     - Specifically creates a sheet called 'Last 6_DNT'.
     - Copies from 'To Sort_DNT'.
-    - Fixed filter: Only shows rows where Column O is 'last 6'.
-    - Removes filter arrows for a clean, static report.
+    - Dynamic Filter: Shows 'last 6' OR 'outliers excl.' based on Settings.
     - Applies Conditional Formatting for Stdev thresholds.
     """
     
     source_sheet_name = "To Sort_DNT"
     new_sheet_name = "Last 6_DNT"
-    fixed_filter = "last 6"
+    
+    # --- Check Calculation Mode ---
+    # Options: "Last 6" or "Last 6 Outliers Excluded"
+    calc_mode = settings.get_setting("CALC_MODE_STEP3")
+    
+    if calc_mode == "Last 6 Outliers Excl.":
+        # Matches the label we wrote in Step 1 (row 7 of calc box)
+        fixed_filter = "last 6 outliers excl." 
+    else:
+        fixed_filter = "last 6"
+
+    print(f"   ℹ️ Step 3 Calculation Mode: {calc_mode} -> Filtering for '{fixed_filter}'")
 
     wb = load_workbook(file_path)
 
@@ -56,22 +67,20 @@ def step3_last6_water(file_path: str):
                 except:
                     pass
 
-    # Copy dimensions
-    #for row_idx, row_dim in source_ws.row_dimensions.items():
-    #    new_ws.row_dimensions[row_idx].height = row_dim.height
-    #for col_letter, col_dim in source_ws.column_dimensions.items():
-    #    new_ws.column_dimensions[col_letter].width = col_dim.width
-    
-    # --- 3. Fixed Filter Logic (Hide rows not matching 'last 6') ---
+    # --- 3. Dynamic Filter Logic ---
     last_row = new_ws.max_row
-    col_o_idx = 15 # Column O
+    col_o_idx = 15 # Column O (Labels)
+    
+    # Note: If filtering for "outliers excl.", we need to adjust row heights or ensure
+    # the target row exists. In Step 1, "outliers excl." is Row 7 relative to data start.
     
     for r in range(2, last_row + 1):
         cell_val = new_ws.cell(row=r, column=col_o_idx).value
-        # Standardize string for comparison
         val_str = str(cell_val).strip().lower() if cell_val else ""
         
-        if val_str != fixed_filter:
+        # We assume the header row (1) is always shown.
+        # Hide any row that is NOT the header AND does NOT match our filter.
+        if r > 1 and val_str != fixed_filter:
             new_ws.row_dimensions[r].hidden = True
             
     # Ensure AutoFilter arrows are removed
@@ -84,24 +93,28 @@ def step3_last6_water(file_path: str):
     # Column Q (17) and T (20)
     COL_Q = 17
     COL_T = 20
-    START_ROW_FOR_CF = 8 
-    ROW_STEP = 12
-
+    
+    # We must apply formatting to the visible rows. Since we can't easily know *which* # specific rows are visible without iterating, we'll apply it generally to the whole column range
+    # or iterate. Iterating is safer to avoid huge rules.
+    
+    # Note: If filtering 'outliers excl.', the row index changes from Step 1 logic.
+    # We apply to ALL rows, but since hidden ones aren't seen, it's fine.
+    
     if stdev_threshold is not None:
-        for r_idx in range(START_ROW_FOR_CF, last_row + 1, ROW_STEP):
-            # Carbon Stdev (Q)
-            q_ref = f"{get_column_letter(COL_Q)}{r_idx}"
-            new_ws.conditional_formatting.add(
-                q_ref,
-                CellIsRule(operator="greaterThan", formula=[str(stdev_threshold)], fill=fill_error)
-            )
-
-            # Oxygen Stdev (T)
-            t_ref = f"{get_column_letter(COL_T)}{r_idx}"
-            new_ws.conditional_formatting.add(
-                t_ref,
-                CellIsRule(operator="greaterThan", formula=[str(stdev_threshold)], fill=fill_error)
-            )
+        # Applying a rule to the entire column range (e.g. Q2:Q1000) is more efficient 
+        # than adding 100 separate rules.
+        
+        range_q = f"{get_column_letter(COL_Q)}2:{get_column_letter(COL_Q)}{last_row}"
+        range_t = f"{get_column_letter(COL_T)}2:{get_column_letter(COL_T)}{last_row}"
+        
+        new_ws.conditional_formatting.add(
+            range_q,
+            CellIsRule(operator="greaterThan", formula=[str(stdev_threshold)], fill=fill_error)
+        )
+        new_ws.conditional_formatting.add(
+            range_t,
+            CellIsRule(operator="greaterThan", formula=[str(stdev_threshold)], fill=fill_error)
+        )
 
     # --- 5. Finalize View ---
     for s in wb.worksheets:
@@ -109,6 +122,12 @@ def step3_last6_water(file_path: str):
     new_ws.sheet_view.tabSelected = True
     wb.active = wb.index(new_ws)
     new_ws.sheet_view.selection = [Selection(activeCell="A1", sqref="A1")]
+
+    # Add Settings Popup Comment
+    embed_settings_popup(new_ws, "Y1")
+
+    # Set column widths
+    new_ws.column_dimensions["O"].width = 16 
     
     wb.save(file_path)
-    print(f"✅ Step 3: '{new_sheet_name}' created.")
+    print(f"✅ Step 3: '{new_sheet_name}' created (Filter: {fixed_filter}).")

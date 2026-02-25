@@ -5,6 +5,7 @@ from copy import copy
 from openpyxl import load_workbook
 from openpyxl.worksheet.views import Selection
 from openpyxl.utils import get_column_letter
+from utils import embed_settings_popup
 
 def _try_force_excel_recalc(file_path, timeout=5.0):
     """
@@ -286,6 +287,13 @@ def step2_tosort_carbonate(file_path, filter_choice="Last 6"):
     except Exception:
         # ignore selection errors
         pass
+
+    # Add Settings Popup Comment
+    embed_settings_popup(ws_new, "AB1")
+
+
+    # Set column widths
+    ws_new.column_dimensions["Q"].width = 16
 
     # Save the workbook (this writes To Sort into the same workbook that still has Data formulas)
     try:

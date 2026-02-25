@@ -6,7 +6,8 @@ from openpyxl.worksheet.views import Selection
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.formatting.rule import FormulaRule 
-import settings 
+import settings
+from utils import embed_settings_popup 
 
 # --- Helper Functions ---
 
@@ -131,6 +132,7 @@ def step4_pre_group_carbonate(file_path: str):
     new_ws.column_dimensions[get_column_letter(3)].width = 22 # Identifier
     new_ws.column_dimensions[get_column_letter(11)].width = 12 # C Meas
     new_ws.column_dimensions[get_column_letter(14)].width = 12 # O Meas
+    new_ws.column_dimensions[get_column_letter(10)].width = 16 # Q (Last 6 Column)
 
     new_ws.freeze_panes = "A2"
 
@@ -281,6 +283,9 @@ def step4_pre_group_carbonate(file_path: str):
             fill=fill_error
         )
         new_ws.conditional_formatting.add(f"O2:O{final_max_row}", rule_O)
+
+    # Add Settings Popup Comment
+    embed_settings_popup(new_ws, "R1")
 
     wb.save(file_path)
     print(f"✅ Step 4: Carbonate Pre-Group sheet '{new_sheet_name}' created.")

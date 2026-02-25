@@ -5,6 +5,7 @@ from openpyxl.styles import PatternFill, Font
 from openpyxl.formatting.rule import CellIsRule 
 from copy import copy
 import settings 
+from utils import embed_settings_popup
 
 def step2_tosort_water(file_path: str, filter_choice: str = "Last 6"):
     """
@@ -111,6 +112,12 @@ def step2_tosort_water(file_path: str, filter_choice: str = "Last 6"):
     new_ws.sheet_view.tabSelected = True
     wb.active = wb.index(new_ws)
     new_ws.sheet_view.selection = [Selection(activeCell="A1", sqref="A1")]
+
+    # Add Settings Popup Comment
+    embed_settings_popup(new_ws, "Y1")
+
+    # Set column widths
+    new_ws.column_dimensions["O"].width = 16 
     
     wb.save(file_path)
     print(f"Step 2: To Sort completed on {file_path} using filter '{filter_choice}'")
