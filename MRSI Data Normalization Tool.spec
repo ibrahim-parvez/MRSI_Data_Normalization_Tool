@@ -32,7 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['logo.icns'],
+    icon=['assets/logo.icns'],
 )
 coll = COLLECT(
     exe,
@@ -46,6 +46,6 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='MRSI Data Normalization Tool.app',
-    icon='logo.icns',
+    icon='assets/logo.icns',
     bundle_identifier=None,
 )

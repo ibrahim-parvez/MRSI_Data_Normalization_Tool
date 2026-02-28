@@ -56,6 +56,14 @@ try:
 except ImportError:
     pass
 
+# ---- Imports for Version History ----
+import shutil
+import tempfile
+from datetime import datetime
+
+# ---- Import Current Version ---- 
+from updater import CURRENT_VERSION
+
 # ---------------- Utility: XLS → XLSX ----------------
 def convert_xls_to_xlsx(file_path):
     new_path = os.path.splitext(file_path)[0] + ".xlsx"
@@ -467,7 +475,7 @@ class MaterialTypeWidget(QWidget):
         self.load_data()
 
     def _create_table_section(self):
-        grp = QGroupBox(f"{self.material_type} Reference Materials")
+        grp = QGroupBox(f"{self.material_type} Reference Materials (RM)")
         l = QVBoxLayout()
         grp.setLayout(l)
         
@@ -698,6 +706,7 @@ class AdvancedSettingsTab(QWidget):
         
     def _create_ui(self):
         self._create_general_config()
+        self._create_outlier_settings()
         self._create_calc_logic_section()
         self._create_material_tabs()
         
@@ -730,7 +739,13 @@ class AdvancedSettingsTab(QWidget):
         row1 = QHBoxLayout(row1_container)
         row1.setContentsMargins(0, 0, 0, 0)
         
-        row1.addWidget(QLabel("<b>Stdev Threshold</b>"))
+        # Stack label and subscript vertically
+        lbl_layout = QVBoxLayout()
+        lbl_layout.setSpacing(0)
+        lbl_layout.addWidget(QLabel("<b>Stdev Threshold</b>"))
+        lbl_layout.addWidget(QLabel("<small style='color: gray;'>(All Steps)</small>"))
+        
+        row1.addLayout(lbl_layout)
         row1.addWidget(create_info_label(
             "<b>Standard Deviation Limit</b><br>"
             "Defines the cutoff value for the standard deviation.<br>"
@@ -746,16 +761,43 @@ class AdvancedSettingsTab(QWidget):
         row1.addStretch()
         layout.addWidget(row1_container)
 
-        # Separator Line
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(line)
+        self.layout.addWidget(group)
 
-        # --- Row 2: Outlier Threshold (Sigma) ---
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("<b>Outlier Calculation</b>"))
-        row2.addWidget(create_info_label(
+
+    def _create_outlier_settings(self):
+        group = QGroupBox("Outlier Settings")
+        layout = QVBoxLayout() 
+        group.setLayout(layout)
+        
+        # --- Helper for Info Icon ---
+        def create_info_label(tooltip_text):
+            lbl = InstantTooltipLabel("ⓘ") 
+            lbl.setCursor(Qt.CursorShape.WhatsThisCursor)
+            lbl.setToolTip(tooltip_text)
+            lbl.setStyleSheet("""
+                QLabel {
+                    color: #555;
+                    font-size: 14px;
+                    font-weight: bold;
+                    margin-left: 2px;
+                    margin-right: 5px;
+                }
+                QLabel:hover {
+                    color: #0078d7; 
+                }
+            """)
+            return lbl
+
+        # --- Row 1: Outlier Threshold (Sigma) ---
+        row1 = QHBoxLayout()
+        
+        lbl_layout1 = QVBoxLayout()
+        lbl_layout1.setSpacing(0)
+        lbl_layout1.addWidget(QLabel("<b>Outlier Calculation</b>"))
+        lbl_layout1.addWidget(QLabel("<small style='color: gray;'>(Steps: Data, Group, Normalization)</small>"))
+        
+        row1.addLayout(lbl_layout1)
+        row1.addWidget(create_info_label(
             "<b>Sigma Threshold (Standard Deviations)</b><br>"
             "Determines how strict the outlier detection is.<br>"
             "<ul>"
@@ -764,7 +806,7 @@ class AdvancedSettingsTab(QWidget):
             "<li><b>3σ:</b> avg +- 3*std</li>"
             "</ul>"
         ))
-        row2.addWidget(QLabel(":"))
+        row1.addWidget(QLabel(":"))
 
         self.bg_sigma = QButtonGroup(self)
         self.rb_1sigma = QRadioButton("1σ")
@@ -775,23 +817,29 @@ class AdvancedSettingsTab(QWidget):
         self.bg_sigma.addButton(self.rb_2sigma, 2)
         self.bg_sigma.addButton(self.rb_3sigma, 3)
         
-        row2.addWidget(self.rb_1sigma)
-        row2.addWidget(self.rb_2sigma)
-        row2.addWidget(self.rb_3sigma)
-        row2.addStretch()
-        layout.addLayout(row2)
+        row1.addWidget(self.rb_1sigma)
+        row1.addWidget(self.rb_2sigma)
+        row1.addWidget(self.rb_3sigma)
+        row1.addStretch()
+        layout.addLayout(row1)
 
-        # --- Row 3: Exclusion Logic ---
-        row3 = QHBoxLayout()
-        row3.addWidget(QLabel("<b>Exclusion Logic</b>"))
-        row3.addWidget(create_info_label(
+        # --- Row 2: Exclusion Logic ---
+        row2 = QHBoxLayout()
+        
+        lbl_layout2 = QVBoxLayout()
+        lbl_layout2.setSpacing(0)
+        lbl_layout2.addWidget(QLabel("<b>Exclusion Logic</b>"))
+        lbl_layout2.addWidget(QLabel("<small style='color: gray;'>(Steps: Data, Group, Normalization)</small>"))
+        
+        row2.addLayout(lbl_layout2)
+        row2.addWidget(create_info_label(
             "<b>How to Handle Outliers</b><br>"
             "<ul>"
             "<li><b>Individual:</b> If Carbon (δ13C) is an outlier but Oxygen (δ18O) is good, keep the Oxygen value.</li>"
             "<li><b>Exclude Row:</b> If <i>either</i> value is an outlier, discard the entire measurement row.</li>"
             "</ul>"
         ))
-        row3.addWidget(QLabel(":"))
+        row2.addWidget(QLabel(":"))
 
         self.bg_excl = QButtonGroup(self)
         self.rb_excl_row = QRadioButton("Exclude Entire Row")
@@ -800,10 +848,10 @@ class AdvancedSettingsTab(QWidget):
         self.bg_excl.addButton(self.rb_excl_ind)
         self.bg_excl.addButton(self.rb_excl_row)
         
-        row3.addWidget(self.rb_excl_ind)
-        row3.addWidget(self.rb_excl_row)
-        row3.addStretch()
-        layout.addLayout(row3)
+        row2.addWidget(self.rb_excl_ind)
+        row2.addWidget(self.rb_excl_row)
+        row2.addStretch()
+        layout.addLayout(row2)
 
         # --- Load Initial Settings ---
         curr_sigma = settings.get_setting("OUTLIER_SIGMA") or 2
@@ -820,6 +868,7 @@ class AdvancedSettingsTab(QWidget):
         self.bg_excl.buttonToggled.connect(self._on_excl_mode_changed)
 
         self.layout.addWidget(group)
+
 
     def _create_calc_logic_section(self):
         group = QGroupBox("Data Selection")
@@ -847,7 +896,13 @@ class AdvancedSettingsTab(QWidget):
 
         # Step 3
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel("<b>Step 3</b>"))
+        
+        lbl_layout1 = QVBoxLayout()
+        lbl_layout1.setSpacing(0)
+        lbl_layout1.addWidget(QLabel("<b>Measured 𝛅 values</b>"))
+        lbl_layout1.addWidget(QLabel("<small style='color: gray;'>(Step 3: Last 6)</small>"))
+        
+        row1.addLayout(lbl_layout1)
         row1.addWidget(create_info_label(
             "<b>Calculation Mode for Step 3</b><br>"
             "Decides which data is used to calculate the 'Last 6' Averages.<br>"
@@ -870,7 +925,13 @@ class AdvancedSettingsTab(QWidget):
         
         # Step 7
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("<b>Step 7 (Normalization)</b>"))
+        
+        lbl_layout2 = QVBoxLayout()
+        lbl_layout2.setSpacing(0)
+        lbl_layout2.addWidget(QLabel("<b>Average for RM</b>"))
+        lbl_layout2.addWidget(QLabel("<small style='color: gray;'>(Step 7: Normalization)</small>"))
+        
+        row2.addLayout(lbl_layout2)
         row2.addWidget(create_info_label(
             "<b>Final Report Calculation</b><br>"
             "Decides if outliers should be included in the final normalized dataset.<br>"
@@ -973,12 +1034,67 @@ class LongPressButton(QPushButton):
         # Visually un-press the button so it doesn't look stuck
         self.setDown(False)
 
+# ---------------- Version History UI ----------------
+class VersionHistoryDialog(QDialog):
+    def __init__(self, history, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Version History")
+        self.setMinimumSize(450, 300)
+        self.history = history # List of dicts
+        self.selected_path = None
+        self.action = None 
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Select a previous version to view or restore:"))
+        
+        self.list_widget = QListWidget()
+        # Show newest backups at the top
+        for item in reversed(self.history): 
+            self.list_widget.addItem(f"[{item['time']}] {item['desc']}")
+        layout.addWidget(self.list_widget)
+
+        btn_layout = QHBoxLayout()
+        self.open_btn = QPushButton("📄 Open/View")
+        self.restore_btn = QPushButton("↺ Restore This Version")
+        self.cancel_btn = QPushButton("Cancel")
+
+        self.open_btn.setStyleSheet("background-color: #2196F3; color: white;")
+        self.restore_btn.setStyleSheet("background-color: #FF9800; color: white;")
+
+        btn_layout.addWidget(self.open_btn)
+        btn_layout.addWidget(self.restore_btn)
+        btn_layout.addWidget(self.cancel_btn)
+        layout.addLayout(btn_layout)
+
+        self.open_btn.clicked.connect(self.on_open)
+        self.restore_btn.clicked.connect(self.on_restore)
+        self.cancel_btn.clicked.connect(self.reject)
+
+    def get_selected_item(self):
+        row = self.list_widget.currentRow()
+        if row < 0: return None
+        return self.history[len(self.history) - 1 - row] # Match reversed list
+
+    def on_open(self):
+        item = self.get_selected_item()
+        if item:
+            self.selected_path = item['path']
+            self.action = 'open'
+            self.accept()
+
+    def on_restore(self):
+        item = self.get_selected_item()
+        if item:
+            self.selected_path = item['path']
+            self.action = 'restore'
+            self.accept()
+
 # ---------------- Main GUI ----------------
 class DataToolApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MRSI - Data Normalization Tool")
-        self.setMinimumSize(717, 805)
+        self.setMinimumSize(730, 805)
         self.file_path = None
         self.thread = None
         self.dark_mode = False
@@ -1069,11 +1185,88 @@ class DataToolApp(QWidget):
         self.addAction(self.unlock_action)
         
         self.unlock_action.triggered.connect(self.trigger_secret_unlock)
+
+    # ADD TO THE BOTTOM OF def __init__(self):
+        self.version_history = []
+        self.history_temp_dir = tempfile.mkdtemp(prefix="mrsi_history_")
+
+    # ADD THESE NEW METHODS INSIDE DataToolApp:
+    def save_version(self, description, target_path=None):
+        """Creates a copy of the current file in the temp directory."""
+        path_to_backup = target_path or self.file_path
+        if not path_to_backup or not os.path.exists(path_to_backup): return
+
+        timestamp = datetime.now().strftime("%I:%M:%S %p")
+        safe_time = datetime.now().strftime("%H%M%S")
+        ext = os.path.splitext(path_to_backup)[1]
+        base = os.path.basename(path_to_backup).replace(ext, "")
+        
+        backup_name = f"{base}_{safe_time}_{len(self.version_history)}{ext}"
+        backup_path = os.path.join(self.history_temp_dir, backup_name)
+        
+        try:
+            shutil.copy2(path_to_backup, backup_path)
+            self.version_history.append({
+                'time': timestamp,
+                'desc': description,
+                'path': backup_path
+            })
+            self.history_btn.show() # Unhide button once history exists
+        except Exception as e:
+            self.on_log(f"Warning: Failed to create backup: {e}", "red")
+
+    def reset_history(self):
+        """Clears history and deletes temp files when a new file is loaded."""
+        self.version_history.clear()
+        self.history_btn.hide()
+        for filename in os.listdir(self.history_temp_dir):
+            filepath = os.path.join(self.history_temp_dir, filename)
+            try:
+                os.remove(filepath)
+            except Exception:
+                pass
+
+    def show_history_dialog(self):
+        if not self.version_history: return
+
+        dialog = VersionHistoryDialog(self.version_history, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            if dialog.action == 'open':
+                try:
+                    if sys.platform.startswith("darwin"): subprocess.run(["open", dialog.selected_path])
+                    elif os.name == "nt": os.startfile(dialog.selected_path)
+                    elif os.name == "posix": subprocess.run(["xdg-open", dialog.selected_path])
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Unable to open file:\n{e}")
+            elif dialog.action == 'restore':
+                reply = QMessageBox.question(self, "Confirm Restore", 
+                                             "Overwrite your current working file with this older version?\n\n(A backup of your current state will be saved just in case)",
+                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if reply == QMessageBox.StandardButton.Yes:
+                    try:
+                        self.save_version("State right before user Restoration") 
+                        shutil.copy2(dialog.selected_path, self.file_path)
+                        QMessageBox.information(self, "Restored", "File successfully reverted!")
+                        self.on_log("File reverted to an older version.", "white")
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", f"Failed to restore file:\n{e}")
+
+    def closeEvent(self, event):
+        """Ensures the temporary directory is deleted when the app closes."""
+        try:
+            shutil.rmtree(self.history_temp_dir)
+        except Exception:
+            pass
+        super().closeEvent(event)
     
 
     def process_selected_file(self, path):
         """Helper to handle file loading for both Browse and Drop events"""
         if not path: return
+
+        # Reset history if they select a brand new file
+        if self.file_path != path:
+            self.reset_history()
 
         if path.lower().endswith(".xls"):
             reply = QMessageBox.question(
@@ -1084,6 +1277,7 @@ class DataToolApp(QWidget):
             )
             if reply == QMessageBox.StandardButton.Yes:
                 try:
+                    self.save_version("Original .xls Pre-Conversion Backup", target_path=path)
                     new_path = convert_xls_to_xlsx(path)
                     QMessageBox.information(self, "Success", f"Converted to: {os.path.basename(new_path)}")
                     self.file_path = new_path
@@ -1163,6 +1357,24 @@ class DataToolApp(QWidget):
         """)
         self.menu_btn.clicked.connect(self.show_menu)
         self.menu_btn.longPressed.connect(self.trigger_secret_unlock)
+
+        # ---- History Button (NEW) ----
+        self.history_btn = QPushButton("↺", self)
+        self.history_btn.setProperty("flat", True)
+        self.history_btn.setFixedSize(36, 36)
+        self.history_btn.setToolTip("Version History / Rollback")
+        self.history_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800;
+                color: white;
+                border-radius: 18px;
+                font-size: 18px;
+                padding: 4px 0;
+            }
+            QPushButton:hover { background-color: #F57C00; }
+        """)
+        self.history_btn.clicked.connect(self.show_history_dialog)
+        self.history_btn.hide() # Hidden until a backup actually happens
         
         QTimer.singleShot(0, self.position_header_buttons)
         
@@ -1305,6 +1517,7 @@ class DataToolApp(QWidget):
 
     def position_header_buttons(self):
         self.menu_btn.move(self.width() - 50, 10)
+        self.history_btn.move(self.width() - 95, 10)
     
     # def update_lock_state(self):
     #     if self.is_locked:
@@ -1564,8 +1777,8 @@ class DataToolApp(QWidget):
         msg.setText(f"""
             <h3 align="center">McMaster Research Group for Stable Isotopologues</h3>
             <p align="center">Data Normalization Tool<br>
-            Required Python Version: {python_version}</p>
-            <p align="center">© 2025 MRSI<br>
+            Current Version: {CURRENT_VERSION}<br>
+            <p align="center">© 2026 MRSI<br>
             Developer: <a href='https://www.linkedin.com/in/ibrahim-parvez'>Ibrahim Parvez</a></p>
         """)
         
@@ -1606,6 +1819,7 @@ class DataToolApp(QWidget):
 
     def remove_file(self):
         self.file_path = None
+        self.reset_history()
         self.set_no_file_label()
 
     def browse_file(self):
@@ -1799,6 +2013,9 @@ class DataToolApp(QWidget):
         self.stop_btn.show()
         self.stop_btn.setEnabled(True)
         self.progress.setStyleSheet("QProgressBar::chunk { background-color: #3f51b5; }")
+
+        # Add Thread Log Connection
+        self.save_version("Auto-backup before running steps") 
 
         # Start Thread
         self.thread = WorkerThread(self.file_path, steps, sheet_name, filter_opt, tab_type)
