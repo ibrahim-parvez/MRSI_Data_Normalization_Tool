@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QVBoxLayout, QLabel, QDialog, QGridLayout, QHBoxLay
 from PyQt6.QtCore import Qt, pyqtSignal
 
 # Update this to match the tag name on your GitHub Release (e.g., "v1.0.1")
-CURRENT_VERSION = "v0.9.0"
+CURRENT_VERSION = "v1.0.0"
 GITHUB_REPO = "ibrahim-parvez/MRSI_Data_Normalization_Tool"
 
 class UpdateAvailableDialog(QDialog):

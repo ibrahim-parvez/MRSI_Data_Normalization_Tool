@@ -1226,6 +1226,23 @@ class DataToolApp(QWidget):
         QPushButton[isMaterialToggle="true"] { background-color: #ffffff; color: #333; border: 1px solid #888; padding: 5px 10px; border-radius: 4px; font-weight: bold; }
         QPushButton[isMaterialToggle="true"]:hover { background-color: #f0f0f0; border: 1px solid #333; }
         QPushButton[isMaterialToggle="true"]:checked { background-color: #005a9e; color: white; border: 1px solid #004080; }
+
+        /* --- NEW: RADIO BUTTON STYLING --- */
+        QRadioButton::indicator {
+            width: 14px;
+            height: 14px;
+            border-radius: 8px; /* (14px width + 2px border) / 2 = 8px perfect circle */
+            border: 1px solid #AAA;
+            background-color: #FFFFFF;
+        }
+        QRadioButton::indicator:checked {
+            border: 1px solid #005a9e;
+            background-color: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+                stop:0 #005a9e, stop:0.45 #005a9e, stop:0.55 #FFFFFF, stop:1 #FFFFFF);
+        }
+        QRadioButton::indicator:hover {
+            border: 1px solid #005a9e;
+        }
         """
         
         self.dark_stylesheet = """
@@ -1267,6 +1284,23 @@ class DataToolApp(QWidget):
         QPushButton[isMaterialToggle="true"] { background-color: #1E1F22; color: #E8EAED; border: 1px solid #666; padding: 5px 10px; border-radius: 4px; font-weight: bold; }
         QPushButton[isMaterialToggle="true"]:hover { background-color: #333; border: 1px solid #999; }
         QPushButton[isMaterialToggle="true"]:checked { background-color: #2E7D32; color: white; border: 1px solid #1B5E20; }
+
+        /* --- NEW: RADIO BUTTON STYLING --- */
+        QRadioButton::indicator {
+            width: 14px;
+            height: 14px;
+            border-radius: 8px;
+            border: 1px solid #666;
+            background-color: #2A2B2E;
+        }
+        QRadioButton::indicator:checked {
+            border: 1px solid #2E7D32;
+            background-color: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+                stop:0 #2E7D32, stop:0.45 #2E7D32, stop:0.55 #2A2B2E, stop:1 #2A2B2E);
+        }
+        QRadioButton::indicator:hover {
+            border: 1px solid #2E7D32;
+        }
         """
         # --- OS Default Theme Detection ---
         palette = QApplication.palette()
@@ -1624,7 +1658,15 @@ class DataToolApp(QWidget):
         self.tab_bar.setMovable(False)
         self.tab_bar.setDrawBase(False)
         self.tab_bar.currentChanged.connect(self.on_tab_changed)
-        tabs_and_content.addWidget(self.tab_bar)
+        
+        tab_wrapper_layout = QHBoxLayout()
+        tab_wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        
+        tab_wrapper_layout.addStretch()         # Pushes from the left
+        tab_wrapper_layout.addWidget(self.tab_bar)
+        tab_wrapper_layout.addStretch()         # Pushes from the right
+        
+        tabs_and_content.addLayout(tab_wrapper_layout)
         
         self.content_frame = QFrame()
         self.content_frame.setObjectName("contentPane")
