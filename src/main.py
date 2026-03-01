@@ -1,5 +1,6 @@
 import sys
 import time
+import ctypes
 from PyQt6.QtWidgets import QApplication
 from gui.splash import StartupSplashScreen
 
@@ -8,6 +9,9 @@ window = None
 
 def main():
     global window
+    if sys.platform == 'win32':
+        myappid = 'mrsi.dnt.1.0' # Arbitrary unique identifier
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     app = QApplication(sys.argv)
     
     # 1. Show Splash immediately

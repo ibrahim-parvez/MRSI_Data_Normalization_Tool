@@ -1,0 +1,7 @@
+Windows
+pyinstaller --noconfirm --onefile --windowed --clean --name "MRSI DNT Installer" --icon "logo.ico" installer.py
+pyinstaller --noconfirm --onefile --windowed --clean --name "MRSI Data Normalization Tool" --icon "logo.ico" main.py
+
+Mac
+pyinstaller --noconfirm --windowed --clean --name "MRSI DNT Installer" --icon "logo.icns" installer.py
+pyinstaller --noconfirm --windowed --clean --name "MRSI Data Normalization Tool" --icon "logo.icns" main.py

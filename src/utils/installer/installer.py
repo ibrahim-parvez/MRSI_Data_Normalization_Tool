@@ -18,7 +18,7 @@ from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QByteArray, QUrl, QTimer, 
     QRect, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
 )
-from PyQt6.QtGui import QFont, QPixmap, QDesktopServices
+from PyQt6.QtGui import QFont, QPixmap, QDesktopServices, QIcon
 
 logo_base64 = "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"
 
@@ -64,10 +64,7 @@ class FetchReleasesThread(QThread):
 class DownloadThread(QThread):
     progress = pyqtSignal(int)
     status_update = pyqtSignal(str)
-    
-    # NEW: Emits a formatted string like "5.2 MB / 15.0 MB (2.1 MB/s)"
     stats_update = pyqtSignal(str) 
-    
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
 
@@ -81,7 +78,6 @@ class DownloadThread(QThread):
         self._is_cancelled = True
 
     def format_size(self, bytes_size):
-        """Converts bytes to a human-readable format."""
         if bytes_size < 1024 * 1024:
             return f"{bytes_size / 1024:.1f} KB"
         return f"{bytes_size / (1024 * 1024):.1f} MB"
@@ -96,7 +92,6 @@ class DownloadThread(QThread):
                 downloaded = 0
                 chunk_size = 8192
                 
-                # Setup for speed calculation
                 start_time = time.time()
                 last_update_time = start_time
                 last_downloaded = 0
@@ -110,11 +105,9 @@ class DownloadThread(QThread):
                         file.write(chunk)
                         downloaded += len(chunk)
                         
-                        # --- Calculate Speed and Progress ---
                         current_time = time.time()
                         time_diff = current_time - last_update_time
                         
-                        # Update stats every ~0.2 seconds to avoid UI spam
                         if time_diff >= 0.2 or downloaded == total_size:
                             speed_bps = (downloaded - last_downloaded) / time_diff if time_diff > 0 else 0
                             speed_str = f"{self.format_size(speed_bps)}/s"
@@ -139,24 +132,104 @@ class DownloadThread(QThread):
 
             final_path = self.save_path
 
-            # --- macOS Auto-Extraction Logic (Using Native Unzip) ---
-            if sys.platform != "win32" and self.save_path.lower().endswith('.zip'):
-                self.status_update.emit("Extracting .zip file...")
-                self.stats_update.emit("") # Clear the speed text during extraction
-                extract_dir = os.path.dirname(self.save_path)
+            # --- UNIVERSAL AUTO-EXTRACTION & CLEANUP ---
+            if self.save_path.lower().endswith('.zip'):
+                self.status_update.emit("Extracting and cleaning files...")
+                self.stats_update.emit("") 
                 
-                subprocess.run(["unzip", "-q", "-o", self.save_path, "-d", extract_dir], check=True)
-                os.remove(self.save_path)
+                target_install_dir = os.path.dirname(self.save_path)
+                base_name = os.path.splitext(os.path.basename(self.save_path))[0]
                 
-                macosx_dir = os.path.join(extract_dir, "__MACOSX")
-                if os.path.exists(macosx_dir):
-                    shutil.rmtree(macosx_dir)
+                temp_extract_dir = os.path.join(target_install_dir, base_name + "_temp_extract")
+                os.makedirs(temp_extract_dir, exist_ok=True)
                 
-                app_folders = [d for d in os.listdir(extract_dir) if d.endswith('.app')]
-                if app_folders:
-                    final_path = os.path.join(extract_dir, app_folders[0])
+                if sys.platform == "win32":
+                    with zipfile.ZipFile(self.save_path, 'r') as zip_ref:
+                        zip_ref.extractall(temp_extract_dir)
                 else:
-                    final_path = extract_dir
+                    subprocess.run(["unzip", "-q", "-o", self.save_path, "-d", temp_extract_dir], check=True)
+                    macosx_dir = os.path.join(temp_extract_dir, "__MACOSX")
+                    if os.path.exists(macosx_dir):
+                        shutil.rmtree(macosx_dir)
+
+                os.remove(self.save_path)
+
+                found_app = None
+                
+                # Windows Cleanup
+                if sys.platform == "win32":
+                    extracted_items = os.listdir(temp_extract_dir)
+                    if len(extracted_items) == 1 and os.path.isdir(os.path.join(temp_extract_dir, extracted_items[0])):
+                        app_folder_path = os.path.join(temp_extract_dir, extracted_items[0])
+                    else:
+                        app_folder_path = temp_extract_dir
+                        
+                    for root, dirs, files in os.walk(app_folder_path):
+                        for f in files:
+                            if f.endswith('.exe') and "MRSI" in f.upper():
+                                old_exe_path = os.path.join(root, f)
+                                name_no_ext, ext = os.path.splitext(f)
+                                clean_exe_name = name_no_ext.replace('.', ' ').replace('_', ' ') + ext
+                                new_exe_path = os.path.join(root, clean_exe_name)
+                                if old_exe_path != new_exe_path:
+                                    os.rename(old_exe_path, new_exe_path)
+                                found_app = new_exe_path
+                                break
+                        if found_app: break
+                    
+                    clean_folder_name = "MRSI Data Normalization Tool"
+                    final_folder_path = os.path.join(target_install_dir, clean_folder_name)
+                    
+                    if os.path.exists(final_folder_path):
+                        shutil.rmtree(final_folder_path)
+                        
+                    shutil.move(app_folder_path, final_folder_path)
+                    
+                    if os.path.exists(temp_extract_dir):
+                        shutil.rmtree(temp_extract_dir)
+                        
+                    if found_app:
+                        rel_path = os.path.relpath(found_app, app_folder_path)
+                        final_path = os.path.join(final_folder_path, rel_path)
+                    else:
+                        final_path = final_folder_path
+
+                # macOS Cleanup
+                else:
+                    for root, dirs, files in os.walk(temp_extract_dir):
+                        for d in dirs:
+                            if d.endswith('.app') and "MRSI" in d.upper():
+                                found_app = os.path.join(root, d)
+                                subprocess.run(["xattr", "-cr", found_app], check=False)
+                                break
+                        if found_app:
+                            break
+                            
+                    if found_app:
+                        clean_name = "MRSI Data Normalization Tool.app"
+                        final_app_path = os.path.join(target_install_dir, clean_name)
+                        
+                        if os.path.exists(final_app_path):
+                            shutil.rmtree(final_app_path)
+                            
+                        shutil.move(found_app, final_app_path)
+                        shutil.rmtree(temp_extract_dir)
+                        final_path = final_app_path
+                    else:
+                        final_path = temp_extract_dir
+
+            else:
+                app_dir = os.path.dirname(final_path)
+                app_name = os.path.basename(final_path)
+                name_no_ext, ext = os.path.splitext(app_name)
+                clean_name = name_no_ext.replace('.', ' ').replace('_', ' ') + ext
+                clean_app_path = os.path.join(app_dir, clean_name)
+                
+                if final_path != clean_app_path:
+                    if os.path.exists(clean_app_path):
+                        os.remove(clean_app_path)
+                    os.rename(final_path, clean_app_path)
+                    final_path = clean_app_path
 
             self.finished.emit(final_path)
 
@@ -175,6 +248,12 @@ class SplashScreen(QWidget):
         self.setFixedSize(450, 250)
         self.setObjectName("SplashWindow")
 
+        # --- Fix 2: Set the Window Icon ---
+        if logo_base64:
+            pixmap = QPixmap()
+            pixmap.loadFromData(QByteArray.fromBase64(logo_base64.encode('utf-8')))
+            self.setWindowIcon(QIcon(pixmap))
+
         self.setStyleSheet("""
             QWidget#SplashWindow {
                 background-color: #FAFAFA; 
@@ -191,11 +270,10 @@ class SplashScreen(QWidget):
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         logo_label = QLabel()
-        if logo_base64 and logo_base64 != "FILLIN":
-            pixmap = QPixmap()
-            pixmap.loadFromData(QByteArray.fromBase64(logo_base64.encode('utf-8')))
-            pixmap = pixmap.scaled(90, 90, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            logo_label.setPixmap(pixmap)
+        if logo_base64:
+            # Reuse the pixmap loaded above
+            scaled_pixmap = pixmap.scaled(90, 90, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            logo_label.setPixmap(scaled_pixmap)
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(logo_label)
 
@@ -211,19 +289,16 @@ class SplashScreen(QWidget):
         subtitle.setStyleSheet("color: #555;")
         layout.addWidget(subtitle)
 
-        # --- NEW: Loading Status Text ---
         self.loading_text = QLabel("Connecting to GitHub...")
         self.loading_text.setFont(QFont("Arial", 9))
         self.loading_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.loading_text.setStyleSheet("color: #888; margin-top: 10px;")
         layout.addWidget(self.loading_text)
 
-        # --- Synchronization Flags ---
         self.min_time_passed = False
         self.data_ready = False
         self.next_window = None
 
-        # --- "Pop-In" and Fade-In Animation ---
         self.setWindowOpacity(0.0)
         
         screen = QApplication.primaryScreen().geometry()
@@ -246,7 +321,6 @@ class SplashScreen(QWidget):
         self.anim_group.addAnimation(self.fade_anim)
         self.anim_group.start()
 
-        # Enforce a minimum display time of 2.2 seconds for the splash
         QTimer.singleShot(2200, self.mark_min_time_passed)
 
     def mark_min_time_passed(self):
@@ -259,7 +333,6 @@ class SplashScreen(QWidget):
         self.check_ready()
 
     def check_ready(self):
-        """If the animation finished AND the GitHub fetch is done, proceed."""
         if self.min_time_passed and self.data_ready and self.next_window:
             self.fade_out()
 
@@ -279,11 +352,15 @@ class InstallerApp(QWidget):
     fetch_finished = pyqtSignal()
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MRSI Tool - Installer")
+        self.setWindowTitle("MRSI DNT - Installer")
         self.setMinimumWidth(550)
         
-        # This forces the window to wrap tightly around its contents.
-        # When we show/hide the release notes, the window resizes itself dynamically!
+        # --- Fix 2: Set the Window Icon ---
+        if logo_base64:
+            pixmap = QPixmap()
+            pixmap.loadFromData(QByteArray.fromBase64(logo_base64.encode('utf-8')))
+            self.setWindowIcon(QIcon(pixmap))
+
         self.layout = QVBoxLayout(self)
         self.layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
         self.layout.setContentsMargins(20, 20, 20, 20)
@@ -324,7 +401,7 @@ class InstallerApp(QWidget):
         # ---- Header ----
         header = QHBoxLayout()
         logo_label = QLabel()
-        if logo_base64 and logo_base64 != "FILLIN":
+        if logo_base64:
             pixmap = QPixmap()
             pixmap.loadFromData(QByteArray.fromBase64(logo_base64.encode('utf-8')))
             pixmap = pixmap.scaled(70, 70, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
@@ -387,7 +464,6 @@ class InstallerApp(QWidget):
         self.toggle_notes_btn.clicked.connect(self.toggle_notes)
         self.layout.addWidget(self.toggle_notes_btn)
 
-        # Release Notes TextEdit (Hidden initially)
         self.release_notes = QTextEdit()
         self.release_notes.setReadOnly(True)
         self.release_notes.setFixedSize(500, 150)
@@ -415,7 +491,6 @@ class InstallerApp(QWidget):
         p_layout.addWidget(self.browse_btn)
         sg_layout.addLayout(p_layout)
 
-        # Open After Download Checkbox
         self.open_checkbox = QCheckBox("Launch application immediately after installation")
         self.open_checkbox.setChecked(True)
         self.open_checkbox.setStyleSheet("font-weight: normal;")
@@ -433,7 +508,6 @@ class InstallerApp(QWidget):
         self.progress_bar.hide()
         self.layout.addWidget(self.progress_bar)
 
-        # --- NEW: Label for file size and speed ---
         self.stats_label = QLabel("")
         self.stats_label.setFont(QFont("Arial", 9))
         self.stats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -491,7 +565,6 @@ class InstallerApp(QWidget):
             self.fetch_finished.emit() 
             return
 
-        # Populate the combo box
         for i, r in enumerate(releases):
             tag = r.get("tag_name", "Unknown")
             name = r.get("name", tag)
@@ -516,17 +589,35 @@ class InstallerApp(QWidget):
         QMessageBox.critical(self, "Error", msg)
         self.fetch_finished.emit() 
 
+    # --- Fix 1: Bulletproof OS Asset Selection ---
     def get_os_asset(self, release_data):
         assets = release_data.get("assets", [])
         is_windows = sys.platform == "win32"
         
+        # Sort files to prevent Windows from grabbing the Mac .zip
+        win_files = []
+        mac_files = []
+        
         for asset in assets:
             name = asset["name"].lower()
-            if is_windows and name.endswith(".exe"):
-                return asset
-            elif not is_windows and (name.endswith(".dmg") or name.endswith(".zip") or name.endswith(".app")):
-                return asset
+            if ".app" in name or "mac" in name or name.endswith(".dmg") or name.endswith(".pkg"):
+                mac_files.append(asset)
+            elif name.endswith(".exe") or "win" in name:
+                win_files.append(asset)
+            elif name.endswith(".zip"):
+                # It's a zip file with no obvious OS indicators. Assume it's Windows fallback.
+                win_files.append(asset)
                 
+        target_list = win_files if is_windows else mac_files
+        
+        if target_list:
+            # If on Windows, prioritize the .exe if it exists, otherwise return the zip
+            if is_windows:
+                for a in target_list:
+                    if a["name"].lower().endswith(".exe"):
+                        return a
+            return target_list[0]
+            
         return assets[0] if assets else None
 
     def start_installation(self):
@@ -543,7 +634,6 @@ class InstallerApp(QWidget):
         filename = target_asset["name"]
         save_path = os.path.join(self.path_input.text(), filename)
 
-        # UI Updates
         self.install_btn.hide()
         self.cancel_btn.show()
         self.version_combo.setEnabled(False)
@@ -554,17 +644,13 @@ class InstallerApp(QWidget):
         self.progress_bar.show()
         self.progress_bar.setValue(0)
         
-        self.stats_label.setText("Starting download...") # <-- NEW
-        self.stats_label.show()                            # <-- NEW
+        self.stats_label.setText("Starting download...") 
+        self.stats_label.show()                           
 
-        # Start Download
         self.download_thread = DownloadThread(download_url, save_path)
         self.download_thread.progress.connect(self.progress_bar.setValue)
         self.download_thread.status_update.connect(self.status_label.setText)
-        
-        # --- NEW: Connect the stats signal ---
         self.download_thread.stats_update.connect(self.stats_label.setText) 
-        
         self.download_thread.finished.connect(self.on_download_finished)
         self.download_thread.error.connect(self.on_download_error)
         self.download_thread.start()
@@ -579,7 +665,6 @@ class InstallerApp(QWidget):
         self.progress_bar.setValue(100)
         self.stats_label.hide()
         
-        # Handle Checkbox Auto-Open
         if self.open_checkbox.isChecked() and os.path.exists(final_filepath):
             self.status_label.setText("Installation Complete! Launching application...")
             try:
@@ -588,7 +673,6 @@ class InstallerApp(QWidget):
                 else:
                     subprocess.run(["open", final_filepath])
                     
-                # Exit the installer gracefully after launch
                 QTimer.singleShot(1500, QApplication.quit)
                 return
             except Exception as e:
@@ -597,7 +681,6 @@ class InstallerApp(QWidget):
             self.status_label.setText("Installation Complete!")
             QMessageBox.information(self, "Success", f"Successfully installed to:\n{final_filepath}")
 
-        # Reset UI if auto-closing didn't occur
         self.cancel_btn.hide()
         self.cancel_btn.setEnabled(True)
         self.install_btn.show()
@@ -611,7 +694,6 @@ class InstallerApp(QWidget):
         self.status_label.setText("Download Failed/Cancelled.")
         self.stats_label.hide()
         
-        # Reset UI
         self.cancel_btn.hide()
         self.cancel_btn.setEnabled(True)
         self.install_btn.show()
@@ -625,18 +707,21 @@ class InstallerApp(QWidget):
             QMessageBox.critical(self, "Error", msg)
 
 if __name__ == "__main__":
+    # --- Fix 2 (Part B): Explicitly declare the App ID to Windows so the Taskbar uses your icon! ---
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            myappid = 'mrsi.dnt.installer.1.0' 
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
     
-    # Initialize Main App but keep it hidden. It starts fetching immediately.
     main_window = InstallerApp()
-    
-    # Show Splash Screen 
     splash = SplashScreen()
     splash.next_window = main_window
-    
-    # Wire the fetch_finished signal to the splash screen's ready check
     main_window.fetch_finished.connect(splash.mark_data_ready)
-    
     splash.show()
     
     sys.exit(app.exec())

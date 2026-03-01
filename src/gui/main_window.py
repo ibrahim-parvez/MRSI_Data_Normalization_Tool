@@ -265,7 +265,7 @@ class AboutDialog(QDialog):
     """A custom About dialog with a base64 logo and an inline update checker."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("About MRSI Tool")
+        self.setWindowTitle("About MRSI DNT")
         self.setFixedSize(350, 320)
         
         # Match the main window's theme
@@ -1170,6 +1170,12 @@ class DataToolApp(QWidget):
         super().__init__()
         self.setWindowTitle("MRSI - Data Normalization Tool")
         self.setMinimumSize(730, 825)
+
+        icon_pixmap = QPixmap()
+        icon_pixmap.loadFromData(QByteArray.fromBase64(logo_base64.encode('utf-8')))
+        self.setWindowIcon(QIcon(icon_pixmap))
+
+        
         self.file_path = None
         self.thread = None
         self.dark_mode = False
@@ -2277,7 +2283,7 @@ class DataToolApp(QWidget):
         """Sets up the UI progress dialog and starts the download thread."""
         # Create a blocking progress dialog
         self.update_progress_dialog = QProgressDialog("Downloading update...", None, 0, 100, self)
-        self.update_progress_dialog.setWindowTitle("Updating MRSI Tool")
+        self.update_progress_dialog.setWindowTitle("Updating MRSI DNT")
         self.update_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
         self.update_progress_dialog.setCancelButton(None) # Prevent cancelling to avoid partial files
         self.update_progress_dialog.setAutoClose(True)

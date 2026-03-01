@@ -1222,7 +1222,15 @@
 		</data>
 		<key>Resources/base_library.zip</key>
 		<data>
-		Msw7dAbe2lKUxvLtwMKBFNHdxG8=
+		cZf8sf5DZdjYK8pxtznen4pVWlc=
+		</data>
+		<key>Resources/certifi/cacert.pem</key>
+		<data>
+		/se4wKF8HFVf0zuu5TZ48xt2Re4=
+		</data>
+		<key>Resources/certifi/py.typed</key>
+		<data>
+		2jmj7l5rSw0yVb/vlWAYkK/YBwk=
 		</data>
 		<key>Resources/cryptography-46.0.1.dist-info/INSTALLER</key>
 		<data>
@@ -11606,6 +11614,11 @@
 			<key>symlink</key>
 			<string>../Resources/base_library.zip</string>
 		</dict>
+		<key>Frameworks/certifi</key>
+		<dict>
+			<key>symlink</key>
+			<string>../Resources/certifi</string>
+		</dict>
 		<key>Frameworks/charset_normalizer/md.cpython-313-darwin.so</key>
 		<dict>
 			<key>cdhash</key>
@@ -15213,7 +15226,21 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			S8R0tGzhrdGPM5DNChofO99kTuwImDPd6p8S4J8xX/w=
+			ZksyB+/Zl0ce9XuArC7+akW0B57CTN3o2m1/BaIj/Sw=
+			</data>
+		</dict>
+		<key>Resources/certifi/cacert.pem</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			kQLmo2RKBxumzb1KU2mPKRxKZLGEUKCLwEZUi221zIs=
+			</data>
+		</dict>
+		<key>Resources/certifi/py.typed</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=
 			</data>
 		</dict>
 		<key>Resources/charset_normalizer</key>
