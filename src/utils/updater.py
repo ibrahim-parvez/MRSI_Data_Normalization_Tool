@@ -130,7 +130,6 @@ class AutoUpdater(QThread):
             self.check_finished.emit(False, "", "")
         except Exception as e:
             self.error_occurred.emit(f"Failed to check for updates: {str(e)}")
-            self.check_finished.emit(False, "", "")
 
     def download_update(self):
         try:
@@ -155,7 +154,6 @@ class AutoUpdater(QThread):
             self.download_finished.emit(download_path)
         except Exception as e:
             self.error_occurred.emit(f"Download failed: {str(e)}")
-            self.download_finished.emit("")
 
 def apply_update_and_restart(download_path):
     """Generates and runs an OS-specific script to replace the running executable."""
