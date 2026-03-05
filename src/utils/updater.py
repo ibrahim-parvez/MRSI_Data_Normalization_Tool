@@ -163,39 +163,36 @@ def apply_update_and_restart(download_path):
         return
 
     current_exe = sys.executable
-    
-    # Save the scripts to the system temp directory so they survive the app deletion
     temp_dir = tempfile.gettempdir()
 
     if sys.platform == "win32":
         bat_path = os.path.join(temp_dir, "update_script.bat")
         
-        # FIX 1: Use 'ping' instead of 'timeout' (timeout fails in hidden windows)
-        # Also ensure there's no leading whitespace before the batch commands
+        # FIX 1: Added a WaitLoop so the script keeps trying until the file unlocks
         with open(bat_path, "w") as bat_file:
             bat_file.write(f"""@echo off
-                            ping 127.0.0.1 -n 3 > NUL
+                            :WaitLoop
+                            ping 127.0.0.1 -n 2 > NUL
                             move /y "{download_path}" "{current_exe}"
+                            if errorlevel 1 goto WaitLoop
                             start "" "{current_exe}"
                             del "%~f0"
                             """)
         
-        # FIX 2: Clean PyInstaller variables from the environment
         clean_env = os.environ.copy()
         keys_to_remove = [k for k in clean_env if k.startswith('_PYI_') or k.startswith('_MEI')]
         for k in keys_to_remove:
             clean_env.pop(k, None)
 
-        # Pass the clean environment to the subprocess
         subprocess.Popen(
             [bat_path], 
             creationflags=subprocess.CREATE_NO_WINDOW, 
             env=clean_env
         )
-        sys.exit(0)
+        # FIX 2: Use os._exit(0) to instantly kill the app and release the .exe lock
+        os._exit(0)
 
     elif sys.platform == "darwin":
-        # MAC: We are inside /Contents/MacOS/. We need to go up to the .app level.
         app_bundle_path = os.path.dirname(os.path.dirname(os.path.dirname(current_exe)))
         parent_dir = os.path.dirname(app_bundle_path) 
         app_name = os.path.basename(app_bundle_path)  
@@ -212,11 +209,11 @@ def apply_update_and_restart(download_path):
                             """)
         os.chmod(sh_path, 0o755) 
         
-        # It's good practice to clean the environment on macOS too, just in case
         clean_env = os.environ.copy()
         keys_to_remove = [k for k in clean_env if k.startswith('_PYI_') or k.startswith('_MEI')]
         for k in keys_to_remove:
             clean_env.pop(k, None)
             
         subprocess.Popen([sh_path], start_new_session=True, env=clean_env)
-        sys.exit(0)
+        # FIX 2: Apply to Mac as well for a clean instant kill
+        os._exit(0)
