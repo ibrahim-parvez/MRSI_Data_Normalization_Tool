@@ -35,9 +35,14 @@ def embed_settings_popup(ws, cell_coordinate="AB1", show_popup=True):
         ("Outliers Excluded", "Outliers Excluded")
     ]
     
+    # --- NEW: Format Stdev Threshold based on Enable/Disable toggle ---
+    stdev_enabled = config.get('STDEV_THRESHOLD_ENABLED', True)
+    stdev_val = config.get('STDEV_THRESHOLD')
+    stdev_display = f"{stdev_val}" if stdev_enabled else "Disabled"
+    
     clean_text = (
         "--- Run Settings ---\n\n"
-        f"Stdev Threshold: {config.get('STDEV_THRESHOLD')}\n\n"
+        f"Stdev Threshold: {stdev_display}\n\n"
         
         "Outlier Calculation (Sigma):\n"
         f"{format_opts(sigma_opts, config.get('OUTLIER_SIGMA'))}\n\n"
@@ -52,12 +57,13 @@ def embed_settings_popup(ws, cell_coordinate="AB1", show_popup=True):
         f"{format_opts(step7_opts, config.get('CALC_MODE_STEP7'))}"
     )
     
-    # CRITICAL FIX: Add "px" to the dimensions so Excel doesn't discard them on inactive sheets.
+    # CRITICAL FIX: Use "pt" instead of "px". 
+    # Windows Excel VML ignores px and collapses the box. pt (points) works cross-platform.
     settings_comment = Comment(
         text=clean_text, 
         author="DNT", 
-        width="250px",  
-        height="320px"  
+        width="250pt",  
+        height="320pt"  
     )
     
     # Target the cell, set the text, and attach the comment

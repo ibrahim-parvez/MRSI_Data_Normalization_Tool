@@ -1,6 +1,8 @@
 import json
 
 _SETTINGS_CONFIG = {
+    # New: Toggle for Stdev
+    "STDEV_THRESHOLD_ENABLED": False,
     "STDEV_THRESHOLD": 0.08,
     
     # New: Outlier Configuration
@@ -59,7 +61,12 @@ def set_setting(key, value, sub_key=None):
     Sets the new value. 
     If sub_key is provided (e.g. 'Carbonate'), updates only that entry in the dictionary.
     """
-    if key == "STDEV_THRESHOLD":
+    # New: Handle the enable/disable toggle
+    if key == "STDEV_THRESHOLD_ENABLED":
+        _SETTINGS_CONFIG[key] = bool(value)
+        return True, "Updated"
+
+    elif key == "STDEV_THRESHOLD":
         try:
             new_value = float(value)
             if new_value <= 0: return False, "Must be positive."

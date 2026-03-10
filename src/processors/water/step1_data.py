@@ -22,7 +22,13 @@ def step1_data_water(file_path, sheet_name='ExportGB2.wke', sparkline=False):
     new_sheet_name = 'Data_DNT'
     
     # --- Configuration from Settings ---
-    stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+    stdev_is_enabled = settings.get_setting("STDEV_THRESHOLD_ENABLED")
+    
+    # If disabled, set the variable to None so it bypasses conditional formatting
+    if stdev_is_enabled:
+        stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+    else:
+        stdev_threshold = None
     sigma_mult = settings.get_setting("OUTLIER_SIGMA") or 2
     exclusion_mode = settings.get_setting("OUTLIER_EXCLUSION_MODE") or "Individual"
     

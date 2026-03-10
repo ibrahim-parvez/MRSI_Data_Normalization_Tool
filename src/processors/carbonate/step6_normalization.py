@@ -484,14 +484,17 @@ def _detect_decimal_places_from_format(fmt: str):
 def step6_normalization_carbonate(file_path):
     # 🔴 Get the threshold setting
     # --- 1. Load Settings ---
-    try:
-        threshold = settings.get_setting("STDEV_THRESHOLD")
-        outlier_sigma = settings.get_setting("OUTLIER_SIGMA") or 2
-        exclusion_mode = settings.get_setting("OUTLIER_EXCLUSION_MODE") or "Individual"
-    except AttributeError:
-        threshold = 0.08
-        outlier_sigma = 2
-        exclusion_mode = "Individual"
+
+    stdev_is_enabled = settings.get_setting("STDEV_THRESHOLD_ENABLED")
+    
+    # If disabled, set the variable to None so it bypasses conditional formatting
+    if stdev_is_enabled:
+        stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+    else:
+        stdev_threshold = None
+    outlier_sigma = settings.get_setting("OUTLIER_SIGMA") or 2
+    exclusion_mode = settings.get_setting("OUTLIER_EXCLUSION_MODE") or "Individual"
+
     
     strike_font = Font(strike=True, color="FF0000")
 
@@ -991,7 +994,7 @@ def step6_normalization_carbonate(file_path):
     
     # Conditional Formatting (Dynamic Start)
     max_data_row = ws_group.max_row
-    threshold_str = str(threshold)
+    threshold_str = str(stdev_threshold)
     
     ws_group.conditional_formatting.add(
         f"L{start_gray_row}:L{max_data_row}",

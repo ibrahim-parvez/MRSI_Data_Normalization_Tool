@@ -109,8 +109,14 @@ def step5_group_water(file_path: str):
     """
     
     # --- 1. Settings ---
-    stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
-    if stdev_threshold is None: stdev_threshold = 0.08
+    # --- Configuration from Settings ---
+    stdev_is_enabled = settings.get_setting("STDEV_THRESHOLD_ENABLED")
+    
+    # If disabled, set the variable to None so it bypasses conditional formatting
+    if stdev_is_enabled:
+        stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+    else:
+        stdev_threshold = None
 
     # NEW: Get Outlier Settings
     sigma_val = settings.get_setting("OUTLIER_SIGMA")

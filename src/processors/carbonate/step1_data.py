@@ -22,7 +22,14 @@ def step1_data_carbonate(file_path, sheet_name='ExportGB2.wke'):
     """
 
     # --- Configuration from Settings ---
-    stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+    # --- Configuration from Settings ---
+    stdev_is_enabled = settings.get_setting("STDEV_THRESHOLD_ENABLED")
+    
+    # If disabled, set the variable to None so it bypasses conditional formatting
+    if stdev_is_enabled:
+        stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+    else:
+        stdev_threshold = None
     sigma_mult = settings.get_setting("OUTLIER_SIGMA") or 2
     exclusion_mode = settings.get_setting("OUTLIER_EXCLUSION_MODE") or "Individual"
 
@@ -440,7 +447,7 @@ def step1_data_carbonate(file_path, sheet_name='ExportGB2.wke'):
         last6_row = row_positions.get("last 6")
         
         # 1. Stdev Threshold (Orange Fill)
-        if last6_row:
+        if last6_row and stdev_threshold is not None:
             for col in [col_c_stdev, col_o_stdev]:
                 ws.conditional_formatting.add(
                     f"{get_column_letter(col)}{last6_row}",

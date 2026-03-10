@@ -121,14 +121,17 @@ def step5_group_carbonate(file_path: str):
     target_sibling_name = "Pre-Group_DNT"
 
     # --- 1. Load Settings ---
-    try:
+    # --- Configuration from Settings ---
+    stdev_is_enabled = settings.get_setting("STDEV_THRESHOLD_ENABLED")
+    
+    # If disabled, set the variable to None so it bypasses conditional formatting
+    if stdev_is_enabled:
         stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
-        outlier_sigma = settings.get_setting("OUTLIER_SIGMA") or 2
-        exclusion_mode = settings.get_setting("OUTLIER_EXCLUSION_MODE") or "Individual"
-    except AttributeError:
-        stdev_threshold = 0.08
-        outlier_sigma = 2
-        exclusion_mode = "Individual"
+    else:
+        stdev_threshold = None
+    outlier_sigma = settings.get_setting("OUTLIER_SIGMA") or 2
+    exclusion_mode = settings.get_setting("OUTLIER_EXCLUSION_MODE") or "Individual"
+
 
     # Load Reference Materials
     # Carbonate (for coloring and inclusion in Phase 1)

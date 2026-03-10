@@ -61,7 +61,15 @@ def step6_normalization_water(file_path: str):
     summary_ws = wb.create_sheet("Normalization_DNT", wb.index(group_ws))
 
     # --- 1. Load Settings & Determine Offsets ---
-    stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+    # --- Configuration from Settings ---
+    stdev_is_enabled = settings.get_setting("STDEV_THRESHOLD_ENABLED")
+    
+    # If disabled, set the variable to None so it bypasses conditional formatting
+    if stdev_is_enabled:
+        stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+    else:
+        stdev_threshold = None
+        
     calc_mode = settings.get_setting("CALC_MODE_STEP7")
     
     use_outliers = (calc_mode == "Outliers Excluded")

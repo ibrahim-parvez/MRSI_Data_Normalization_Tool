@@ -184,29 +184,37 @@ def step3_last6_carbonate(file_path):
                     tgt.number_format = fmt_three if dec >= 3 else fmt_two
 
     # -------------------- CONDITIONAL FORMATTING --------------------
-    threshold = settings.get_setting("STDEV_THRESHOLD")
+    # --- Configuration from Settings ---
+    stdev_is_enabled = settings.get_setting("STDEV_THRESHOLD_ENABLED")
+    
+    # If disabled, set the variable to None so it bypasses conditional formatting
+    if stdev_is_enabled:
+        stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+    else:
+        stdev_threshold = None
 
     red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 
-    # Column S (19) - Carbon Stdev
-    ws_new.conditional_formatting.add(
-        f"S2:S{ws_new.max_row}",
-        CellIsRule(
-            operator="greaterThan",
-            formula=[str(threshold)],
-            fill=red_fill
+    if stdev_threshold is not None:
+        # Column S (19) - Carbon Stdev
+        ws_new.conditional_formatting.add(
+            f"S2:S{ws_new.max_row}",
+            CellIsRule(
+                operator="greaterThan",
+                formula=[str(stdev_threshold)],
+                fill=red_fill
+            )
         )
-    )
 
-    # Column V (22) - Oxygen Stdev
-    ws_new.conditional_formatting.add(
-        f"V2:V{ws_new.max_row}",
-        CellIsRule(
-            operator="greaterThan",
-            formula=[str(threshold)],
-            fill=red_fill
+        # Column V (22) - Oxygen Stdev
+        ws_new.conditional_formatting.add(
+            f"V2:V{ws_new.max_row}",
+            CellIsRule(
+                operator="greaterThan",
+                formula=[str(stdev_threshold)],
+                fill=red_fill
+            )
         )
-    )
 
     # ------------------------------------------------------------
     # SELECT A1, MAKE SHEET ACTIVE

@@ -87,7 +87,14 @@ def step3_last6_water(file_path: str):
     new_ws.auto_filter.ref = None 
 
     # --- 4. Conditional Formatting (Red Stdev Highlights) ---
-    stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+    # --- Configuration from Settings ---
+    stdev_is_enabled = settings.get_setting("STDEV_THRESHOLD_ENABLED")
+    
+    # If disabled, set the variable to None so it bypasses conditional formatting
+    if stdev_is_enabled:
+        stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+    else:
+        stdev_threshold = None
     fill_error = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 
     # Column Q (17) and T (20)

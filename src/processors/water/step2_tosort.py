@@ -84,7 +84,14 @@ def step2_tosort_water(file_path: str, filter_choice: str = "Last 6"):
     
     # --- 5. CONDITIONAL FORMATTING (Only for "Last 6") ---
     if filter_choice_lower == "last 6":
-        stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+        # --- Configuration from Settings ---
+        stdev_is_enabled = settings.get_setting("STDEV_THRESHOLD_ENABLED")
+        
+        # If disabled, set the variable to None so it bypasses conditional formatting
+        if stdev_is_enabled:
+            stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+        else:
+            stdev_threshold = None
         fill_error = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         
         COL_Q = 17

@@ -30,9 +30,14 @@ def step4_pre_group_water(file_path: str):
     source_sheet_name = "Last 6_DNT"
     
     # Check for the required setting
-    stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
-    if stdev_threshold is None:
-        print("⚠️ Warning: 'stdev_threshold' not found in settings. Conditional formatting will be skipped.")
+    # --- Configuration from Settings ---
+    stdev_is_enabled = settings.get_setting("STDEV_THRESHOLD_ENABLED")
+    
+    # If disabled, set the variable to None so it bypasses conditional formatting
+    if stdev_is_enabled:
+        stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
+    else:
+        stdev_threshold = None
 
     # Define the number format for 3 decimal places
     THREE_DECIMAL_FORMAT = "0.000"

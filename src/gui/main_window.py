@@ -7,14 +7,14 @@ import xlwings as xw
 import hashlib
 import base64
 
-from PyQt6.QtGui import QFont, QIcon, QCursor, QPainter, QColor, QPen, QAction, QKeySequence, QPixmap, QImage, QDesktopServices
+from PyQt6.QtGui import QFont, QIcon, QCursor, QPainter, QColor, QPen, QAction, QKeySequence, QPixmap, QImage, QDesktopServices, QDoubleValidator
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QFileDialog, QTabWidget, QTextEdit, QCheckBox,
     QLineEdit, QComboBox, QGroupBox, QMessageBox, QMenu, QProgressBar, QFrame,
     QSizePolicy, QSpacerItem, QGridLayout, QTabBar, QDialog, QScrollArea, QButtonGroup, 
     QRadioButton, QListWidget, QAbstractItemView, QTableWidget, QTableWidgetItem, QHeaderView, QLayout,
-    QToolTip, QStyleOptionGroupBox, QProgressDialog, QLabel, QStyle, QDoubleSpinBox
+    QToolTip, QStyleOptionGroupBox, QProgressDialog, QLabel, QStyle, QDoubleSpinBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPoint, QRect, QSize, QPropertyAnimation, QEasingCurve, QByteArray, QUrl
 
@@ -606,6 +606,9 @@ class MaterialTypeWidget(QWidget):
         # UNIVERSAL HIGHLIGHT: A transparent gray that works beautifully in both Light and Dark mode!
         highlight_color = QColor(128, 128, 128, 40) 
         
+        # Get the initial color for this row
+        current_color = mat_data.get("color", "black")
+        
         for i, key in enumerate(keys):
             item = QTableWidgetItem(str(mat_data.get(key, "")))
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -613,16 +616,41 @@ class MaterialTypeWidget(QWidget):
             if i == 0:
                 item.setBackground(highlight_color)
                 item.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+                
+                # --- NEW: Set the initial text color ---
+                # QColor handles standard string names like "red", "darkblue", etc. perfectly
+                item.setForeground(QColor(current_color))
             
             self.table.setItem(row, i, item)
             
         combo = QComboBox()
         colors = ["black", "green", "red", "darkblue", "lightblue", "orange", "purple", "brown", "magenta", "teal", "blue", "cyan"]
         combo.addItems(colors)
-        combo.setCurrentText(mat_data.get("color", "black"))
-        combo.currentTextChanged.connect(lambda: self._save_table_data())
+        combo.setCurrentText(current_color)
+        
+        # --- FIXED: Connect to a new custom method instead of just the save lambda ---
+        combo.currentTextChanged.connect(self._on_combo_color_changed)
+        
         self.table.setCellWidget(row, 6, combo)
 
+    def _on_combo_color_changed(self):
+        if self._loading: return
+        
+        # Figure out which combobox triggered this signal
+        combo = self.sender()
+        if combo:
+            # Find the row that holds this specific combobox
+            for r in range(self.table.rowCount()):
+                if self.table.cellWidget(r, 6) == combo:
+                    # Grab the item in Column 0 and update its text color
+                    item = self.table.item(r, 0)
+                    if item:
+                        item.setForeground(QColor(combo.currentText()))
+                    break
+                    
+        # Call your existing save function
+        self._save_table_data()
+        
     def refresh_slope_ui(self):
         for i in reversed(range(self.slope_layout.count())): 
             w = self.slope_layout.itemAt(i).widget()
@@ -737,7 +765,7 @@ class AdvancedSettingsTab(QWidget):
         self._create_material_tabs()
         
     def _create_general_config(self):
-        group = QGroupBox("General Configuration")
+        group = QGroupBox("1. Conditional Formatting for Excel")
         layout = QVBoxLayout() 
         group.setLayout(layout)
         
@@ -760,6 +788,64 @@ class AdvancedSettingsTab(QWidget):
             """)
             return lbl
 
+        # --- Visual Example Row ---
+        visual_layout = QHBoxLayout()
+        visual_layout.setContentsMargins(0, 0, 0, 0) # Add a little breathing room below it
+        
+        # 1. Normal Cell (White)
+        self.lbl_visual_good = QLabel()
+        self.lbl_visual_good.setFixedSize(45, 25)
+        self.lbl_visual_good.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_visual_good.setStyleSheet("""
+            background-color: #FFFFFF; 
+            color: #000000; 
+            border: 1px solid #D4D4D4; 
+            font-family: 'Segoe UI', sans-serif;
+            font-size: 11px;
+        """)
+        
+        # 2. Arrow
+        lbl_arrow = QLabel("➔")
+        lbl_arrow.setStyleSheet("color: #888; font-size: 16px; font-weight: bold;")
+        lbl_arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # 3. Highlighted Cell (Excel Red)
+        self.lbl_visual_bad = QLabel()
+        self.lbl_visual_bad.setFixedSize(45, 25)
+        self.lbl_visual_bad.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_visual_bad.setStyleSheet("""
+            background-color: #FFC7CE; 
+            color: #9C0006; 
+            border: 1px solid #FFC7CE;
+            font-family: 'Segoe UI', sans-serif;
+            font-size: 11px;
+            font-weight: bold;
+        """)
+        
+        # Add to layout
+        visual_layout.addWidget(QLabel("<small style='color: gray;'><i>Example:</i></small>"))
+        visual_layout.addWidget(self.lbl_visual_good)
+        visual_layout.addWidget(lbl_arrow)
+        visual_layout.addWidget(self.lbl_visual_bad)
+        visual_layout.addStretch()
+        
+        layout.addLayout(visual_layout)
+
+        # --- NEW: Checkbox to Enable/Disable (Moved above threshold label) ---
+        toggle_layout = QHBoxLayout()
+        self.chk_stdev = QCheckBox()
+        
+        # Get setting and apply initial text
+        is_enabled = settings.get_setting("STDEV_THRESHOLD_ENABLED")
+        is_enabled_bool = is_enabled if is_enabled is not None else True
+        self.chk_stdev.setChecked(is_enabled_bool)
+        self.chk_stdev.setText("Enabled" if is_enabled_bool else "Disabled")
+        self.chk_stdev.stateChanged.connect(self._on_stdev_toggled)
+        
+        toggle_layout.addWidget(self.chk_stdev)
+        toggle_layout.addStretch()
+        layout.addLayout(toggle_layout)
+
         # --- Row 1: Stdev Threshold ---
         row1 = QHBoxLayout()
         
@@ -776,30 +862,40 @@ class AdvancedSettingsTab(QWidget):
             "Any value above this limit will be highlighted <span style='color:red;'>red</span> in the stdev columns."
         ))
         row1.addWidget(QLabel(":"))
+
+        # --- Use QLineEdit for "Unlimited" decimals ---
+        self.input_stdev = QLineEdit()
+        self.input_stdev.setFixedWidth(55) 
         
-        # --- FIXED: Use QDoubleSpinBox but HIDE the broken native arrows ---
-        self.input_stdev = QDoubleSpinBox()
-        self.input_stdev.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons) # Removes the blank arrows
-        self.input_stdev.setFixedWidth(50) 
-        self.input_stdev.setDecimals(2)    
-        self.input_stdev.setSingleStep(0.01) 
-        self.input_stdev.setRange(0.0, 100.0) 
+        # NEW: Stylesheet to visually dim the input box when disabled
+        self.input_stdev.setStyleSheet("""
+            QLineEdit:disabled {
+                background-color: #EAEAEA;
+                color: #B0B0B0;
+                border: 1px solid #D3D3D3;
+            }
+        """)
         
-        # Safely load the setting as a float
+        validator = QDoubleValidator(0.0, 100.0, 99, self)
+        validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        self.input_stdev.setValidator(validator)
+        
         current_stdev = float(settings.get_setting("STDEV_THRESHOLD") or 0.8)
-        self.input_stdev.setValue(current_stdev)
+        self.input_stdev.setText(f"{current_stdev:g}")
+        
         self.input_stdev.editingFinished.connect(self._on_stdev_changed)
+        self.input_stdev.textChanged.connect(self._on_text_changed_for_visual)
         
         row1.addWidget(self.input_stdev)
         
         # --- Create Custom Up/Down Buttons ---
-        btn_up = QPushButton("▲")
-        btn_down = QPushButton("▼")
+        self.btn_up = QPushButton("▲")
+        self.btn_down = QPushButton("▼")
         
-        for btn in [btn_up, btn_down]:
+        for btn in [self.btn_up, self.btn_down]:
             btn.setFixedSize(20, 13)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            # Neutral styling that works beautifully in both Light and Dark mode
+            # NEW: Added disabled styling for the buttons so they also look inactive
             btn.setStyleSheet("""
                 QPushButton { 
                     background-color: transparent; 
@@ -813,32 +909,83 @@ class AdvancedSettingsTab(QWidget):
                     background-color: #888; 
                     color: white; 
                 }
+                QPushButton:disabled {
+                    border: 1px solid #D3D3D3;
+                    color: #D3D3D3;
+                }
             """)
             
-        # Hook them up to the SpinBox's built-in math functions
-        btn_up.clicked.connect(self.input_stdev.stepUp)
-        btn_down.clicked.connect(self.input_stdev.stepDown)
+        self.btn_up.clicked.connect(self._step_up_stdev)
+        self.btn_down.clicked.connect(self._step_down_stdev)
         
-        # Stack the buttons vertically next to the input
         spin_btn_layout = QVBoxLayout()
         spin_btn_layout.setSpacing(2)
         spin_btn_layout.setContentsMargins(0, 0, 0, 0)
-        spin_btn_layout.addWidget(btn_up)
-        spin_btn_layout.addWidget(btn_down)
+        spin_btn_layout.addWidget(self.btn_up)
+        spin_btn_layout.addWidget(self.btn_down)
         
         row1.addLayout(spin_btn_layout)
         row1.addStretch()
         
-        # Add the layout directly to the group box layout
+        # Set initial visual state (Renamed method to reflect we change state, not visibility)
+        self._update_stdev_state(self.chk_stdev.isChecked())
+        
         layout.addLayout(row1)
-
         self.layout.addWidget(group)
+        
+        self._update_visual_example(current_stdev)
+
+    def _update_visual_example(self, current_limit):
+        self.lbl_visual_good.setText(f"{current_limit:.3f}")
+        self.lbl_visual_bad.setText(f"{current_limit:.3f}")
+
+    # --- UPDATED: State handling methods ---
+    def _on_stdev_toggled(self):
+        is_enabled = self.chk_stdev.isChecked()
+        
+        # Toggle the text between Enabled and Disabled
+        self.chk_stdev.setText("Enabled" if is_enabled else "Disabled")
+        
+        settings.set_setting("STDEV_THRESHOLD_ENABLED", is_enabled)
+        self._update_stdev_state(is_enabled)
+        
+    def _update_stdev_state(self, is_enabled):
+        # Instead of .setVisible(), we now use .setEnabled() to dim them
+        self.input_stdev.setEnabled(is_enabled)
+        self.btn_up.setEnabled(is_enabled)
+        self.btn_down.setEnabled(is_enabled)
 
 
     def _create_outlier_settings(self):
-        group = QGroupBox("Outlier Settings")
+        group = QGroupBox("2. Outlier Settings")
         layout = QVBoxLayout() 
         group.setLayout(layout)
+        
+        # --- NEW: Visual Example Row for Outliers ---
+        example_layout = QHBoxLayout()
+        example_layout.setContentsMargins(0, 0, 0, 5) # Keeps it tucked up near the title
+        
+        # 1. The 'Example:' text
+        lbl_example_text = QLabel("<small style='color: gray;'><i>Example:</i></small>")
+        
+        # 2. The Excel-style Cell
+        lbl_outlier_cell = QLabel("<s>4.020</s>")
+        lbl_outlier_cell.setFixedSize(45, 22) # Made slightly shorter to match a standard row height
+        lbl_outlier_cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_outlier_cell.setStyleSheet("""
+            background-color: #FFFFFF; 
+            color: #FF0000; 
+            border: 1px solid #D4D4D4; 
+            font-family: 'Segoe UI', sans-serif;
+            font-size: 11px;
+        """)
+        
+        # Add them together and push them to the left
+        example_layout.addWidget(lbl_example_text)
+        example_layout.addWidget(lbl_outlier_cell)
+        example_layout.addStretch()
+
+        layout.addLayout(example_layout)
         
         # --- Helper for Info Icon ---
         def create_info_label(tooltip_text):
@@ -942,7 +1089,7 @@ class AdvancedSettingsTab(QWidget):
 
 
     def _create_calc_logic_section(self):
-        group = QGroupBox("Data Selection")
+        group = QGroupBox("3. Data Selection")
         layout = QVBoxLayout()
         group.setLayout(layout)
         
@@ -986,7 +1133,7 @@ class AdvancedSettingsTab(QWidget):
 
         self.bg_step3 = QButtonGroup(self)
         self.rb_s3_last6 = QRadioButton("Last 6")
-        self.rb_s3_last6_excl = QRadioButton("Last 6 Outliers Excluded")
+        self.rb_s3_last6_excl = QRadioButton("Last 6 Outliers Excluded (See Section 2)")
         self.bg_step3.addButton(self.rb_s3_last6)
         self.bg_step3.addButton(self.rb_s3_last6_excl)
         row1.addWidget(self.rb_s3_last6)
@@ -1015,7 +1162,7 @@ class AdvancedSettingsTab(QWidget):
 
         self.bg_step7 = QButtonGroup(self)
         self.rb_s7_all = QRadioButton("All Values")
-        self.rb_s7_outlier = QRadioButton("Outliers Excluded")
+        self.rb_s7_outlier = QRadioButton("Outliers Excluded (See Section 2)")
         self.bg_step7.addButton(self.rb_s7_all)
         self.bg_step7.addButton(self.rb_s7_outlier)
         row2.addWidget(self.rb_s7_all)
@@ -1048,14 +1195,37 @@ class AdvancedSettingsTab(QWidget):
         
         self.layout.addWidget(self.tabs)
 
+    def _step_up_stdev(self):
+        """Increases the line edit value by 0.01"""
+        try: val = float(self.input_stdev.text() or 0.0)
+        except ValueError: val = 0.0
+        
+        new_val = val + 0.01
+        self.input_stdev.setText(f"{new_val:g}")
+        self._on_stdev_changed()
+
+    def _step_down_stdev(self):
+        """Decreases the line edit value by 0.01"""
+        try: val = float(self.input_stdev.text() or 0.0)
+        except ValueError: val = 0.0
+        
+        # Prevent it from going below 0
+        new_val = max(0.0, val - 0.01)
+        self.input_stdev.setText(f"{new_val:g}")
+        self._on_stdev_changed()
+
+    def _on_text_changed_for_visual(self, text):
+        """Updates the visual example in real time as the user types"""
+        try: val = float(text) if text else 0.0
+        except ValueError: val = 0.0
+        self._update_visual_example(val)
+
     def _on_stdev_changed(self):
-        val = self.input_stdev.value() # Retrieves a float instead of text
-        success, msg = settings.set_setting("STDEV_THRESHOLD", val)
-        if not success:
-            QMessageBox.warning(self, "Invalid Input", msg)
-            # Revert to the last known good setting if it fails
-            safe_val = float(settings.get_setting("STDEV_THRESHOLD") or 0.8)
-            self.input_stdev.setValue(safe_val)
+        """Saves the QLineEdit text as a float into settings"""
+        try: val = float(self.input_stdev.text() or 0.0)
+        except ValueError: val = 0.0
+        
+        settings.set_setting("STDEV_THRESHOLD", val)
 
     def _on_calc_mode_changed(self, btn, checked):
         if not checked: return

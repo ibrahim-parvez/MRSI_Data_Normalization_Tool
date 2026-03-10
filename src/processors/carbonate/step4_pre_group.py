@@ -50,10 +50,14 @@ def step4_pre_group_carbonate(file_path: str):
 
     # --- 1. Settings & Styles ---
     # Get Threshold
-    try:
+    # --- Configuration from Settings ---
+    stdev_is_enabled = settings.get_setting("STDEV_THRESHOLD_ENABLED")
+    
+    # If disabled, set the variable to None so it bypasses conditional formatting
+    if stdev_is_enabled:
         stdev_threshold = settings.get_setting("STDEV_THRESHOLD")
-    except AttributeError:
-        stdev_threshold = 0.08 # Fallback
+    else:
+        stdev_threshold = None
     
     # Fills
     fill_error = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid") # Red for high Stdev
