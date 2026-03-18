@@ -1002,17 +1002,25 @@ class DataToolApp(QWidget):
         
         self.unlock_action.triggered.connect(self.trigger_secret_unlock)
 
-        # --- DARK MODE KEYBOARD SHORTCUT ---
+        # --- DARK MODE MENU ITEM (Visual only) ---
         self.dark_mode_action = QAction("Toggle Dark Mode", self)
+        # We DO NOT set the shortcut here, so the menu stays clean!
+        self.dark_mode_action.triggered.connect(self.toggle_dark_mode)
+        
+        # Note: You still add self.dark_mode_action to your menu wherever 
+        # that code happens in your script.
+
+        # --- DARK MODE KEYBOARD SHORTCUT (Background listener only) ---
+        self.dark_mode_shortcut_action = QAction(self) # No text label!
         
         # Maps to Ctrl+D on Windows/Linux and Cmd+D on macOS
-        self.dark_mode_action.setShortcut(QKeySequence("Ctrl+D"))
+        self.dark_mode_shortcut_action.setShortcut(QKeySequence("Ctrl+D"))
         
         # Attach it to the main window so it listens globally
-        self.addAction(self.dark_mode_action)
+        self.addAction(self.dark_mode_shortcut_action)
         
-        # Connect it to your existing function
-        self.dark_mode_action.triggered.connect(self.toggle_dark_mode)
+        # Connect it to the exact same function
+        self.dark_mode_shortcut_action.triggered.connect(self.toggle_dark_mode)
 
     # ADD TO THE BOTTOM OF def __init__(self):
         self.version_history = []
@@ -1334,6 +1342,7 @@ class DataToolApp(QWidget):
         
         btn_row.addWidget(hint_label) # Added hint
         btn_row.addWidget(self.browse_btn)
+        btn_row.addStretch()
         btn_row.addWidget(self.open_file_btn)
         btn_row.addWidget(self.open_folder_btn)
         btn_row.addStretch()
