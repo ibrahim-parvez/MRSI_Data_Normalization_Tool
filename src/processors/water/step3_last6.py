@@ -84,7 +84,7 @@ def step3_last6_water(file_path: str):
             new_ws.row_dimensions[r].hidden = True
             
     # Ensure AutoFilter arrows are removed
-    new_ws.auto_filter.ref = None 
+    #new_ws.auto_filter.ref = None 
 
     # --- 4. Conditional Formatting (Red Stdev Highlights) ---
     # --- Configuration from Settings ---

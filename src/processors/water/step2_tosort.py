@@ -12,7 +12,6 @@ def step2_tosort_water(file_path: str, filter_choice: str = "Last 6"):
     Step 2: To Sort
     - Creates 'To Sort_DNT' as a copy of 'Data_DNT'.
     - Hides rows in 'To Sort_DNT' based on the filter_choice applied to Column O.
-    - RE-ADDED: Keeps filter dropdown arrows on Row 1.
     - Applies Conditional Formatting (Red Stdev) ONLY if filter_choice is 'Last 6'.
     """
     
@@ -67,13 +66,13 @@ def step2_tosort_water(file_path: str, filter_choice: str = "Last 6"):
     last_col_letter = get_column_letter(new_ws.max_column)
     filter_choice_lower = filter_choice.lower()
 
-    # Define the filter range (e.g., A1:X100)
+    # Define the filter range (e.g., A1:X100) to keep the dropdown arrows
     new_ws.auto_filter.ref = f"A1:{last_col_letter}{last_row}"
 
-    # If filter is NOT 'all', hide rows and set the filter criteria
+    # If filter is NOT 'all', manually hide rows based on the filter
     if filter_choice_lower != 'all':
-        # Add the filter icon state to Column O (0-indexed for add_filter_column, so O is 14)
-        new_ws.auto_filter.add_filter_column(14, [filter_choice])
+        # ❌ REMOVED: new_ws.auto_filter.add_filter_column(14, [filter_choice]) 
+        # (This was writing corrupted XML that crashed Mac Excel's AppleScript bridge)
         
         for r in range(2, last_row + 1):
             cell_val = new_ws.cell(row=r, column=col_o_idx).value
@@ -127,4 +126,5 @@ def step2_tosort_water(file_path: str, filter_choice: str = "Last 6"):
     new_ws.column_dimensions["O"].width = 16 
     
     wb.save(file_path)
-    print(f"Step 2: To Sort completed on {file_path} using filter '{filter_choice}'")
+    wb.close()
+    print(f"✅ Step 2: To Sort completed on {file_path} using filter '{filter_choice}'")

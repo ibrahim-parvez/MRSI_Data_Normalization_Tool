@@ -3,6 +3,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QGroupBox, QFrame, QLabel
 )
 from PyQt6.QtCore import Qt
+
 import utils.settings as settings
 
 class WaterTab(QWidget):
