@@ -408,7 +408,11 @@ class InstallerApp(QWidget):
             logo_label.setPixmap(pixmap)
             logo_label.setFixedSize(70, 70)
             logo_label.setCursor(Qt.CursorShape.PointingHandCursor)
-            logo_label.mousePressEvent = lambda e: QDesktopServices.openUrl(QUrl("https://science.mcmaster.ca"))
+            # Define a quick handler that implicitly returns None
+            def open_url_handler(event):
+                QDesktopServices.openUrl(QUrl("https://science.mcmaster.ca"))
+
+            logo_label.mousePressEvent = open_url_handler
         else:
             logo_label.setFixedSize(70, 70)
             
