@@ -2,6 +2,8 @@
 
 This application is designed to fully automate and streamline the processing of mass spectrometer data for the McMaster Research Group for Stable Isotopologues. Built to be robust and user-friendly, this release introduces a complete graphical interface for handling both Carbonate and Water sample data with highly customizable statistical parameters.
 
+* Download the Installer: https://github.com/ibrahim-parvez/MRSI_Data_Normalization_Tool/releases/tag/Installer
+
 ---
 
 ## ✨ Key Features
