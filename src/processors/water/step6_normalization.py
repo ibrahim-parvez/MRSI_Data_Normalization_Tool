@@ -923,7 +923,7 @@ def step6_normalization_water(file_path: str):
             skip_row = False
             if isinstance(id_val, str):
                 normalized_val = id_val.strip().upper()
-                if normalized_val.startswith("HECO2") or normalized_val.startswith("CO2"): skip_row = True
+                if normalized_val.startswith("HECO2") or normalized_val.startswith("CO2"): skip_row = False
             
             # Write ID to Column S (Spacer)
             if not skip_row: summary_ws.cell(row=r, column=col_S, value=id_val)

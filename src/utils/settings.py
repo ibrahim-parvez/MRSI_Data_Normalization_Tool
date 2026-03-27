@@ -17,7 +17,7 @@ _SETTINGS_CONFIG = {
     "REFERENCE_MATERIALS": {
         "Carbonate": [
             {"col_c": "IAEA 603", "col_d": "", "col_e": "", "col_f": "2.46", "col_g": "-2.37", "col_h": "", "color": "green"},
-            {"col_c": "LSVEC",    "col_d": "", "col_e": "-46.6", "col_f": "", "col_g": "", "col_h": "-26.7", "color": "lightblue"},
+            {"col_c": "LSVEC",    "col_d": "", "col_e": "", "col_f": "-46.6", "col_g": "-26.7", "col_h": "", "color": "lightblue"},
             {"col_c": "NBS 18",   "col_d": "", "col_e": "", "col_f": "-5.01", "col_g": "-23.01", "col_h": "", "color": "red"},
             {"col_c": "NBS 19",   "col_d": "", "col_e": "", "col_f": "1.95",  "col_g": "-2.20",  "col_h": "", "color": "darkblue"}
         ],

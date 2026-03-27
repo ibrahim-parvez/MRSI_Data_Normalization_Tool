@@ -138,10 +138,48 @@ def draw_blue_box_structure(ws):
             cell.border = Border(top=medium if r==2 else None, bottom=medium if r==3 else None, 
                                  left=medium if c==col_start else None, right=medium if c==col_end else None)
 
+    # ---> NEW: Extract all active slope materials for checking
+    active_slope_materials = []
+    for group in slope_groups:
+        for item in group:
+            active_slope_materials.append(str(item).strip().lower())
+
     # Write Reference Material Data
     for idx, mat in enumerate(materials):
         r = data_start_row + idx
-        vals = [mat.get("col_c"), mat.get("col_d"), mat.get("col_e"), mat.get("col_f"), mat.get("col_g"), mat.get("col_h")]
+        
+        # Check if material is used in ANY slope group
+        mat_name = str(mat.get("col_c", "")).strip().lower()
+        mat_clean = re.sub(r'[\s\-_]+', '', mat_name.upper())
+        mat_no_std = mat_clean.replace("STD", "")
+        
+        is_used_in_slope = False
+        for active_mat in active_slope_materials:
+            active_clean = re.sub(r'[\s\-_]+', '', active_mat.upper())
+            active_no_std = active_clean.replace("STD", "")
+            
+            if active_clean in mat_clean or (len(active_no_std) >= 4 and active_no_std in mat_no_std):
+                is_used_in_slope = True
+                break
+                
+        # Get original values
+        c_val = mat.get("col_c")
+        d_val = mat.get("col_d")
+        e_val = mat.get("col_e")
+        f_val = mat.get("col_f")
+        g_val = mat.get("col_g")
+        h_val = mat.get("col_h")
+        
+        # ---> NEW: Shift values if not used in slope/intercept
+        if not is_used_in_slope:
+            if f_val is not None and str(f_val).strip() != "":
+                e_val = f_val
+                f_val = None
+            if g_val is not None and str(g_val).strip() != "":
+                h_val = g_val
+                g_val = None
+
+        vals = [c_val, d_val, e_val, f_val, g_val, h_val]
         font_style = get_style_font(mat.get("color", "black"), mat.get("bold", False))
         
         for i, val in enumerate(vals):
@@ -310,9 +348,8 @@ def populate_blue_box_math(ws, slope_info, mat_row_map):
                     found_map[mat_name] = target_row
                     break
 
-    # 2. Write Slope/Intercept Formulas (using Helper Columns)
+    # 2. Write Slope/Intercept Formulas (using Original Columns)
     center = Alignment(horizontal="center", vertical="center")
-    helper_col_idx = 100 
     
     for idx, group_list in enumerate(slope_groups):
         if idx >= len(slope_info): break 
@@ -326,29 +363,20 @@ def populate_blue_box_math(ws, slope_info, mat_row_map):
                 rows.append(mat_row_map[key])
         
         if len(rows) >= 2:
-            h_pub_c = helper_col_idx; h_meas_c = helper_col_idx + 1
-            h_pub_o = helper_col_idx + 2; h_meas_o = helper_col_idx + 3
+            # Find the boundaries for the continuous range
+            min_r = min(rows)
+            max_r = max(rows)
             
-            h_start_row = 2
-            for i, r_idx in enumerate(rows):
-                ws.cell(row=h_start_row + i, column=h_pub_c, value=f'=F{r_idx}')
-                ws.cell(row=h_start_row + i, column=h_meas_c, value=f'=K{r_idx}')
-                ws.cell(row=h_start_row + i, column=h_pub_o, value=f'=G{r_idx}')
-                ws.cell(row=h_start_row + i, column=h_meas_o, value=f'=N{r_idx}')
-            
-            h_end_row = h_start_row + len(rows) - 1
-            
-            rc_pub = f"{get_column_letter(h_pub_c)}{h_start_row}:{get_column_letter(h_pub_c)}{h_end_row}"
-            rc_meas = f"{get_column_letter(h_meas_c)}{h_start_row}:{get_column_letter(h_meas_c)}{h_end_row}"
-            ro_pub = f"{get_column_letter(h_pub_o)}{h_start_row}:{get_column_letter(h_pub_o)}{h_end_row}"
-            ro_meas = f"{get_column_letter(h_meas_o)}{h_start_row}:{get_column_letter(h_meas_o)}{h_end_row}"
+            # Map directly to F (Published C), K (Measured C), G (Published O), N (Measured O)
+            rc_pub = f"F{min_r}:F{max_r}"
+            rc_meas = f"K{min_r}:K{max_r}"
+            ro_pub = f"G{min_r}:G{max_r}"
+            ro_meas = f"N{min_r}:N{max_r}"
             
             ws.cell(row=current_slope_row, column=11, value=f'=SLOPE({rc_pub},{rc_meas})')
             ws.cell(row=current_slope_row+1, column=11, value=f'=INTERCEPT({rc_pub},{rc_meas})')
             ws.cell(row=current_slope_row, column=14, value=f'=SLOPE({ro_pub},{ro_meas})')
             ws.cell(row=current_slope_row+1, column=14, value=f'=INTERCEPT({ro_pub},{ro_meas})')
-            
-            helper_col_idx += 5
 
 def create_rich_text(parts):
     richtext = CellRichText()
