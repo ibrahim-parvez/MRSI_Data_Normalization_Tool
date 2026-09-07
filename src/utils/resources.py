@@ -13,6 +13,12 @@ loaders below degrade to a null pixmap rather than raising, and callers
 fall back to a text label.
 """
 
+# Annotations stay unevaluated strings instead of being built into objects at
+# import time: marginally cheaper to import, and it keeps a stray ``int | None``
+# from turning into a runtime TypeError if this ever runs on an older Python.
+# 3.14 makes this the default anyway (PEP 649).
+from __future__ import annotations
+
 from pathlib import Path
 import sys
 

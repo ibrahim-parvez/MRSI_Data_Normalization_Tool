@@ -1,14 +1,25 @@
 # Runtime dependencies for the MRSI Data Normalization Tool.
 # Build-time only: pyinstaller (see packaging/build.py).
+#
+# Requires Python 3.13. Build on the same version on every machine, or the
+# two platforms drift apart.
+#
+# Lower bounds are the first releases shipping CPython 3.13 wheels — anything
+# older on 3.13 has to compile from source, if it builds at all.
+#
+# Upper bounds are majors this code has not been tested against. They matter
+# because the Windows and macOS boxes install separately: without a cap a
+# fresh install picks up a new major on one machine and not the other, and
+# the binaries you ship diverge. Lift them deliberately, after a test run.
 
-PyQt6>=6.6
-pandas>=2.0
-numpy>=1.24
-openpyxl>=3.1
-matplotlib>=3.7
-xlwings>=0.30
-requests>=2.31
-certifi>=2023.7
+PyQt6>=6.8,<7                # 6.8 = first release cut after 3.13; abi3 wheels
+pandas>=2.2.3,<3             # 2.2.3 = first cp313 wheels; 3.0 is breaking
+numpy>=2.1.0,<3              # 2.1.0 = first cp313 wheels
+matplotlib>=3.9.2,<4         # 3.9.2 = first cp313 wheels
+xlwings>=0.33.2,<1           # 0.33.2 = first cp313 wheels
+openpyxl>=3.1,<4             # pure python
+requests>=2.32,<3            # pure python
+certifi>=2024.7.4            # pure python; CA bundle for installer downloads
 
 # Windows only: excel_engine initialises COM on its worker threads.
-pywin32>=306; sys_platform == "win32"
+pywin32>=307; sys_platform == "win32"    # 307 = first cp313 wheels

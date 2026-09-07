@@ -134,6 +134,7 @@ Grab the installer from the [releases page](https://github.com/ibrahim-parvez/MR
 git clone https://github.com/ibrahim-parvez/MRSI_Data_Normalization_Tool.git
 cd MRSI_Data_Normalization_Tool
 
+python3 --version                  # needs 3.13
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 
@@ -157,6 +158,13 @@ python packaging/build.py installer    # the standalone installer
 python packaging/build.py all
 python packaging/build.py clean        # remove build/, dist/ and __pycache__
 ```
+
+Use **Python 3.13 on both machines.** Each platform installs its own
+dependencies, so a version gap between the Windows and macOS boxes means the
+two binaries you ship are built from different code paths — that is how a
+macOS-only build passes while the Windows one crashes on launch. The bounds in
+`requirements.txt` exist to keep the two installs in step; lift them
+deliberately, not by accident.
 
 Output lands in `dist/`. The spec picks the right shape for the host platform:
 a single self-contained `.exe` with a startup splash on Windows, and a `.app`
