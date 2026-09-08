@@ -4,6 +4,8 @@
 Build it with ``python packaging/build.py app`` rather than by hand, so the
 work and dist directories always land in the same place.
 
+clean dist -> rm -rf build dist && rm -f *.spec 
+
 Windows produces a single self-contained .exe with a native splash image;
 macOS produces a .app bundle, which is the layout the in-app updater expects
 when it swaps a new version in.

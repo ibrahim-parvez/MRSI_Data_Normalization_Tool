@@ -26,6 +26,11 @@ def _normalize_text(text):
 # Yield colour code, shared by the Yield table and the Theoretical column:
 # green marks the compound used for reference materials, pink the one used
 # for samples. Everything else in the Yield table stays black.
+# Display format for the blue box's measured values and slope/intercept cells.
+# Three decimals matches the Water processor; the underlying values keep full
+# precision, so Excel's increase/decrease-decimal buttons still reveal more.
+FMT_3_DEC = "0.000"
+
 YIELD_REF_COLOR = "00B050"   # green
 YIELD_SAMP_COLOR = "FF66B2"  # pink
 
@@ -70,6 +75,35 @@ def extract_sample_base(identifier):
     identifier = identifier.strip()
     base = re.sub(r"\s*r\d+(\.\d+)?$", "", identifier, flags=re.IGNORECASE)
     return base.strip()
+
+def _yield_material_present(mat, present_bases):
+    """True when a Yield reference material actually shows up in the run.
+
+    Mirrors the name matching used by the Yield slope/intercept loop so a
+    group is drawn only when its slope can really be built from the data.
+    """
+    mat_clean = re.sub(r'[\s\-_]+', '', str(mat).upper()).replace("STD", "")
+    if not mat_clean:
+        return False
+    for key in present_bases:
+        if not key:
+            continue
+        key_up = key.upper()
+        if mat_clean in key_up or key_up in mat_clean:
+            return True
+    return False
+
+def filter_yield_groups_by_presence(yield_groups, present_bases):
+    """Drop Yield groups whose reference materials were not measured.
+
+    The Yield groups come from Advanced Settings, which students cannot edit,
+    so the defaults (NBS 18 + NBS 19, and Carrara) apply to every file. A run
+    without Carrara would otherwise get a Carrara column with no slope behind
+    it, filling the sheet with zeros. A group survives only when every material
+    it names is present.
+    """
+    return [g for g in yield_groups
+            if g and all(_yield_material_present(m, present_bases) for m in g)]
 
 def extract_run_number(identifier):
     if not identifier or not isinstance(identifier, str):
@@ -396,9 +430,11 @@ def populate_blue_box_math(ws, slope_info, mat_row_map, offset_col=0, setting_ke
 
                     c_cell = ws.cell(row=target_row, column=11 + offset_col, value=f'=IFERROR({get_column_letter(c_avg_col_ref)}{avg_row},"")')
                     c_cell.font = font_style
+                    c_cell.number_format = FMT_3_DEC
                     
                     o_cell = ws.cell(row=target_row, column=14 + offset_col, value=f'=IFERROR({get_column_letter(o_avg_col_ref)}{avg_row},"")')
                     o_cell.font = font_style
+                    o_cell.number_format = FMT_3_DEC
                     
                     found_map[mat_name] = target_row
                     break
@@ -425,17 +461,18 @@ def populate_blue_box_math(ws, slope_info, mat_row_map, offset_col=0, setting_ke
             col_11_let = get_column_letter(11 + offset_col)
             col_14_let = get_column_letter(14 + offset_col)
 
-            ws.cell(row=current_slope_row, column=11 + offset_col).value = ArrayFormula(
-                f"{col_11_let}{current_slope_row}", f'=SLOPE({range_y_pub},{range_x_meas})')
-                
-            ws.cell(row=current_slope_row+1, column=11 + offset_col).value = ArrayFormula(
-                f"{col_11_let}{current_slope_row+1}", f'=INTERCEPT({range_y_pub},{range_x_meas})')
-                
-            ws.cell(row=current_slope_row, column=14 + offset_col).value = ArrayFormula(
-                f"{col_14_let}{current_slope_row}", f'=SLOPE({range_o_pub},{range_o_meas})')
-                
-            ws.cell(row=current_slope_row+1, column=14 + offset_col).value = ArrayFormula(
-                f"{col_14_let}{current_slope_row+1}", f'=INTERCEPT({range_o_pub},{range_o_meas})')
+            for cell, formula in (
+                (ws.cell(row=current_slope_row, column=11 + offset_col),
+                 ArrayFormula(f"{col_11_let}{current_slope_row}", f'=SLOPE({range_y_pub},{range_x_meas})')),
+                (ws.cell(row=current_slope_row+1, column=11 + offset_col),
+                 ArrayFormula(f"{col_11_let}{current_slope_row+1}", f'=INTERCEPT({range_y_pub},{range_x_meas})')),
+                (ws.cell(row=current_slope_row, column=14 + offset_col),
+                 ArrayFormula(f"{col_14_let}{current_slope_row}", f'=SLOPE({range_o_pub},{range_o_meas})')),
+                (ws.cell(row=current_slope_row+1, column=14 + offset_col),
+                 ArrayFormula(f"{col_14_let}{current_slope_row+1}", f'=INTERCEPT({range_o_pub},{range_o_meas})')),
+            ):
+                cell.value = formula
+                cell.number_format = FMT_3_DEC
 
 def draw_yield_table(ws, start_col, box_fill, num_yield_groups):
     max_yield_row = 19 + (num_yield_groups * 3)
@@ -864,6 +901,18 @@ def step6_normalization_carbonate(file_path):
         raise ValueError("Sheet 'Last 6_DNT' not found!")
     ws_last6 = wb["Last 6_DNT"]
 
+    # Yield groups are global defaults, so keep only the ones this run can
+    # actually support. Layout metrics that depend on the count follow.
+    present_yield_bases = set()
+    for row_cells in ws_last6.iter_rows(min_row=2, min_col=col_identifier1, max_col=col_identifier1):
+        base = _normalize_text(extract_sample_base(row_cells[0].value))
+        if base:
+            present_yield_bases.add(base)
+
+    yield_slope_groups = filter_yield_groups_by_presence(yield_slope_groups, present_yield_bases)
+    num_yield_groups = len(yield_slope_groups)
+    EXTRA_VERT_SHIFT = max(0, num_yield_groups - 2) * 3
+
     if "Group_DNT" not in wb.sheetnames:
         raise ValueError("Sheet 'Group_DNT' not found. Run Step 5 first.")
 
@@ -1246,7 +1295,7 @@ def step6_normalization_carbonate(file_path):
                     slope_cell = f"${get_column_letter(YIELD_START_COL + 5)}${20 + grp_idx*3}"
                     int_cell = f"${get_column_letter(YIELD_START_COL + 5)}${21 + grp_idx*3}"
                     
-                    calc_cell = ws_group.cell(row=excel_row, column=calc_col, value=f'=IFERROR(({slope_cell}*Q{excel_row})+{int_cell},"")')
+                    calc_cell = ws_group.cell(row=excel_row, column=calc_col, value=f'=IF(ISNUMBER({slope_cell}),IFERROR(({slope_cell}*Q{excel_row})+{int_cell},""),"")')
                     calc_cell.number_format = '0.00E+00'
                     
                     yp_cell = ws_group.cell(row=excel_row, column=yield_pct_col, value=f'=IFERROR(({get_column_letter(calc_col)}{excel_row}/{get_column_letter(theo_col)}{excel_row})*100,"")')
@@ -1522,7 +1571,8 @@ def step6_normalization_carbonate(file_path):
         col_AJ = YIELD_START_COL + 3
         col_AL = YIELD_START_COL + 5
         
-        for group in yield_slope_groups:
+        for grp_idx, group in enumerate(yield_slope_groups):
+            yield_slope_row = 20 + (grp_idx * 3)
             group_rows = []
             for mat in group:
                 mat_clean = re.sub(r'[\s\-_]+', '', mat.upper()).replace("STD", "")
@@ -1552,8 +1602,6 @@ def step6_normalization_carbonate(file_path):
                 cell_int.value = ArrayFormula(f"{col_AL_let}{yield_slope_row+1}", f'=INTERCEPT({range_y},{range_x})')
                 cell_int.number_format = '0.00E+00'
                 cell_int.font = Font(bold=True)
-                
-                yield_slope_row += 3
             
     start_gray_row = header_row + 1 
     max_sheet_row = ws_group.max_row + 50

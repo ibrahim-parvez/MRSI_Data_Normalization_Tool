@@ -3,13 +3,19 @@
 Shows the splash screen first, then imports the heavy modules (pandas, the
 main window) while the progress bar advances, so the app appears instantly
 instead of after a multi-second cold import.
+
+The imports run on a worker thread rather than the GUI thread. macOS shows the
+spinning-beachball cursor as soon as an app stops servicing its event loop for
+a couple of seconds, and a cold ``import pandas`` out of a frozen bundle takes
+longer than that, so doing it inline made a healthy startup look like a hang.
 """
 
 import ctypes
 import sys
 import time
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from gui.splash import StartupSplashScreen
 from utils.resources import app_icon
@@ -17,8 +23,15 @@ from utils.resources import app_icon
 # Kept at module level so the window is not garbage collected once main() returns.
 window = None
 
+# Likewise for the loader thread: a QThread that goes out of scope while still
+# running takes the process down with it.
+loader = None
+
 # The splash screen stays up for at least this many seconds.
 MIN_DURATION = 1.5
+
+# How often the progress bar repaints while the worker thread imports.
+PROGRESS_TICK_MS = 30
 
 # Windows groups taskbar buttons by this id; without it the app inherits
 # Python's own icon instead of ours.
@@ -51,58 +64,123 @@ def _close_bootloader_splash() -> None:
         pass
 
 
+class ModuleLoader(QThread):
+    """Imports the slow modules without blocking the GUI thread.
+
+    Only imports happen here. The widgets themselves are still constructed on
+    the main thread, because Qt requires it.
+    """
+
+    stage_started = pyqtSignal(str, int)
+    loaded = pyqtSignal()
+    failed = pyqtSignal(str)
+
+    def run(self) -> None:
+        try:
+            self.stage_started.emit("Loading Data Engines (Pandas)...", 45)
+            import pandas  # noqa: F401
+
+            self.stage_started.emit("Loading Interface Modules...", 80)
+            from gui.main_window import DataToolApp  # noqa: F401
+
+            self.loaded.emit()
+        except Exception as exc:  # noqa: BLE001 - reported to the user below
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class SplashProgress(QObject):
+    """Eases the splash progress bar toward a target on the GUI thread.
+
+    The worker thread announces where the bar should be heading; this timer
+    does the moving. Because it runs off the event loop, the splash keeps
+    painting (and macOS keeps seeing a responsive app) throughout the imports.
+    """
+
+    def __init__(self, splash: StartupSplashScreen) -> None:
+        super().__init__()
+        self._splash = splash
+        self._value = 0.0
+        self._target = 0.0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(PROGRESS_TICK_MS)
+
+    def set_target(self, target: int) -> None:
+        self._target = max(self._target, float(target))
+
+    def finish(self) -> None:
+        self._timer.stop()
+        self._value = 100.0
+        self._splash.update_progress(100)
+
+    def _tick(self) -> None:
+        if self._value >= self._target:
+            return
+
+        # Asymptotic ease with a floor, so the bar always visibly creeps
+        # forward even when a stage runs long, and never overshoots.
+        step = max(0.4, (self._target - self._value) * 0.06)
+        self._value = min(self._target, self._value + step)
+        self._splash.update_progress(int(self._value))
+
+
 def _load_application(app: QApplication, splash: StartupSplashScreen) -> None:
-    """Import and construct the main window, driving the splash progress bar.
+    """Kick off the background imports and wire up what happens when they land.
 
     Runs only once the splash screen's update check has finished.
     """
-    global window
+    global loader
 
-    def smooth_progress(current, target, time_allocated, task_start_time):
-        """Ease the bar from current to target over whatever time is left."""
-        time_left = time_allocated - (time.time() - task_start_time)
-        steps_to_move = target - current
+    started_at = time.monotonic()
+    progress = SplashProgress(splash)
 
-        if time_left <= 0 or steps_to_move <= 0:
-            splash.update_progress(target)
-            app.processEvents()
-            return
+    def on_stage(message: str, target: int) -> None:
+        splash.loading_text.setText(message)
+        progress.set_target(target)
 
-        delay_per_step = time_left / steps_to_move
-        for value in range(current + 1, target + 1):
-            splash.update_progress(value)
-            app.processEvents()
-            time.sleep(delay_per_step)
+    def on_failed(message: str) -> None:
+        progress.finish()
+        splash.close()
+        QMessageBox.critical(
+            None,
+            "Startup Failed",
+            f"The application could not finish loading.\n\n{message}",
+        )
+        app.exit(1)
 
-    chunk_time = MIN_DURATION / 3.0
-    splash.update_progress(0)
+    def on_loaded() -> None:
+        global window
 
-    # Each blocking import runs while its own message is on screen.
-    step_start = time.time()
-    splash.loading_text.setText("Loading Data Engines (Pandas)...")
-    app.processEvents()
-    import pandas  # noqa: F401
-    smooth_progress(0, 33, chunk_time, step_start)
+        splash.loading_text.setText("Constructing User Interface...")
+        progress.set_target(95)
+        # Let the bar and the new message paint before the main thread goes
+        # busy building widgets.
+        app.processEvents()
 
-    step_start = time.time()
-    splash.loading_text.setText("Loading Interface Modules...")
-    app.processEvents()
-    from gui.main_window import DataToolApp
-    smooth_progress(33, 66, chunk_time, step_start)
+        from gui.main_window import DataToolApp
 
-    step_start = time.time()
-    splash.loading_text.setText("Constructing User Interface...")
-    app.processEvents()
-    window = DataToolApp()
-    smooth_progress(66, 95, chunk_time, step_start)
+        window = DataToolApp()
 
-    splash.update_progress(100)
-    splash.loading_text.setText("Ready!")
-    app.processEvents()
-    time.sleep(0.3)
+        progress.finish()
+        splash.loading_text.setText("Ready!")
 
+        # Honour the minimum splash duration without blocking the event loop.
+        remaining_ms = int(max(0.0, MIN_DURATION - (time.monotonic() - started_at)) * 1000)
+        QTimer.singleShot(max(remaining_ms, 200), lambda: _reveal(splash))
+
+    loader = ModuleLoader()
+    loader.stage_started.connect(on_stage)
+    loader.loaded.connect(on_loaded)
+    loader.failed.connect(on_failed)
+    loader.start()
+
+
+def _reveal(splash: StartupSplashScreen) -> None:
     splash.close()
-    window.show()
+    if window is not None:
+        window.show()
+        window.raise_()
+        window.activateWindow()
 
 
 def main() -> None:
