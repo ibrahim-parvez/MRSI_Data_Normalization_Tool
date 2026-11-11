@@ -9,7 +9,7 @@ Kept free of imports so the installer can use it without pulling in Qt.
 
 import re
 
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 
 _VERSION_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
 
