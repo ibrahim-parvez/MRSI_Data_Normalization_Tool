@@ -59,6 +59,64 @@ def is_dead_com_error(exc):
     return "RPC server is unavailable" in text or "RPC_E_DISCONNECTED" in text
 
 
+# macOS gates Apple Events behind TCC. Until the user approves this app for
+# "Microsoft Excel" under Privacy & Security > Automation, every event is
+# refused and appscript raises errAEEventNotPermitted (-1743). The bundle also
+# has to declare NSAppleEventsUsageDescription or macOS never even asks - see
+# packaging/app.spec.
+_AUTOMATION_DENIED_MARKERS = (
+    "-1743",                            # errAEEventNotPermitted
+    "declined permission",
+    "not authorized to send apple events",
+    "not allowed assistive access",
+)
+
+BUNDLE_ID = "ca.mcmaster.mrsi.dnt"
+
+
+class ExcelPermissionError(RuntimeError):
+    """macOS refused to let us drive Excel over Apple Events."""
+
+
+def is_automation_permission_error(exc):
+    """True if `exc` is macOS refusing this app permission to control Excel."""
+    if not sys.platform == "darwin":
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _AUTOMATION_DENIED_MARKERS)
+
+
+def automation_permission_message():
+    """User-facing instructions for granting the Automation permission."""
+    return (
+        "macOS is blocking this app from controlling Microsoft Excel, which it "
+        "needs in order to convert and recalculate workbooks.\n\n"
+        "To allow it:\n"
+        "  1. Open System Settings > Privacy & Security > Automation.\n"
+        "  2. Find this app in the list and switch on \"Microsoft Excel\".\n"
+        "  3. Quit and reopen this app, then try again.\n\n"
+        "If the app is not listed there, the permission was denied earlier and "
+        "macOS remembers it. Reset it by running this in Terminal, then "
+        "reopening the app:\n\n"
+        f"    tccutil reset AppleEvents {BUNDLE_ID}"
+    )
+
+
+def open_automation_settings():
+    """Open the Privacy & Security > Automation pane. macOS only; never raises."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        import subprocess
+        subprocess.Popen([
+            "open",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation",
+        ])
+        return True
+    except Exception:
+        return False
+
+
 _cleanup_patched = False
 
 
@@ -79,6 +137,53 @@ def disable_xlwings_zombie_cleanup():
         _cleanup_patched = True
     except Exception:
         pass
+
+
+def _fix_xlwings_mac_exit():
+    """
+    Stop xlwings from raising a traceback when the app exits on macOS.
+
+    xlwings registers an atexit ``cleanup()`` that lists running Excel
+    instances by parsing ``lsappinfo info -only pid``. It expects
+    ``"pid"=25283``, but recent macOS prints a multi-line record with
+    ``pid = 25283``, so ``int()`` fails and Python prints
+    "Exception ignored in atexit callback ... invalid literal for int()".
+
+    That cleanup only resets Excel's status bar after VBA RunPython calls,
+    which this app never makes, so it is unregistered. The pid parsing is
+    also made to read both formats, in case ``xw.apps`` is ever used.
+    """
+    if sys.platform != "darwin" or xw is None:
+        return
+    try:
+        import atexit
+        import re
+        import subprocess
+        from xlwings import _xlmac
+
+        atexit.unregister(_xlmac.cleanup)
+
+        pid_re = re.compile(r'"?pid"?\s*=\s*(\d+)')
+
+        def _iter_excel_instances(self):
+            listing = subprocess.check_output(
+                ["lsappinfo", "visibleprocesslist", "-includehidden"]
+            ).decode("utf-8")
+            for asn in listing.split(" "):
+                if "Microsoft_Excel" in asn:
+                    info = subprocess.check_output(
+                        ["lsappinfo", "info", "-only", "pid", asn]
+                    ).decode("utf-8")
+                    match = pid_re.search(info)
+                    if match:
+                        yield int(match.group(1))
+
+        _xlmac.Apps._iter_excel_instances = _iter_excel_instances
+    except Exception:
+        pass
+
+
+_fix_xlwings_mac_exit()
 
 
 class ExcelEngine:
@@ -109,8 +214,15 @@ class ExcelEngine:
         except Exception:
             pass
 
-        app = xw.App(visible=False, add_book=False)
-        app.display_alerts = False
+        try:
+            app = xw.App(visible=False, add_book=False)
+            app.display_alerts = False
+        except Exception as e:
+            # Translate the raw appscript/TCC failure into something a user can
+            # act on; anything else is left exactly as it was raised.
+            if is_automation_permission_error(e):
+                raise ExcelPermissionError(automation_permission_message()) from e
+            raise
         self._app = app
 
         # Excel opens a blank workbook of its own when it launches - on macOS

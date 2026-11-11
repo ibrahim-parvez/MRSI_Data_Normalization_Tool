@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QLabel, QFileDialog, QTextEdit, QCheckBox, QLineEdit, QComboBox, QGroupBox,
     QMessageBox, QMenu, QProgressBar, QFrame, QSizePolicy, QTabBar, QDialog,
     QRadioButton, QListWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QLayout, QToolTip, QProgressDialog, QStyle,
+    QLayout, QToolTip, QProgressDialog, QStyle, QGridLayout,
 )
 
 # ---- Tab UIs ----
@@ -28,13 +28,20 @@ from gui.tabs.advanced_settings_tab import AdvancedSettingsTab
 from gui.tabs.carbonate_tab import CarbonateTab
 from gui.tabs.water_tab import WaterTab
 from gui.tabs.combine_tab import CombineTab, CombineWorker
+from utils.colors import MATERIAL_COLORS, material_color_hex, next_material_color
 
 # ---- Shared services ----
 import utils.settings as settings
-from utils.excel_engine import recalculate_workbook, save_workbook_as
+from utils.excel_engine import (
+    ExcelPermissionError,
+    open_automation_settings,
+    recalculate_workbook,
+    save_workbook_as,
+)
 from utils.resources import app_icon, logo_pixmap
 from utils.updater import (
     CURRENT_VERSION, AutoUpdater, UpdateAvailableDialog, apply_update_and_restart,
+    is_installed_build, release_notes,
 )
 
 # ---- Pipeline steps ----
@@ -62,6 +69,9 @@ def convert_xls_to_xlsx(file_path):
         # Routed through the shared engine so it reuses a running Excel instance
         # instead of starting and quitting its own - see utils/excel_engine.py.
         return save_workbook_as(file_path, new_path)
+    except ExcelPermissionError:
+        # Already a plain-English explanation - wrapping it would bury it.
+        raise
     except Exception as e:
         raise Exception(f"XLS to XLSX conversion failed: {e}")
 
@@ -139,20 +149,54 @@ class WorkerThread(QThread):
     progress = pyqtSignal(int, int, str)
     stopped_early = pyqtSignal()
     
-    def __init__(self, file_path, steps, sheet_name, filter_option, tab_type="carbonate"):
+    def __init__(self, file_path, steps, sheet_name, filter_option, tab_type="carbonate",
+                 dnt_source=None):
         super().__init__()
         self.file_path = file_path
         self.steps = steps
         self.sheet_name = sheet_name
         self.filter_option = filter_option
         self.tab_type = tab_type
+        # Set when file_path is a _DNT copy this run still has to create.
+        self.dnt_source = dnt_source
         self._is_running = True
 
     def stop(self):
         self._is_running = False
-        
-    def run(self):
+
+    def _make_working_copy(self):
+        """Creates the _DNT copy this run works on. False if it could not.
+
+        A plain file copy on purpose. Routing it through Excel would register
+        the new path with Excel's sandbox and save the user a "Grant Access"
+        prompt, but it needs an Excel instance that outlives the copy, and a
+        long-lived instance is exactly what must not happen here - see run().
+        """
+        src, dest = self.dnt_source, self.file_path
+        self.log.emit(f"Creating working copy: {os.path.basename(dest)}", "white")
         try:
+            shutil.copy2(src, dest)
+            return True
+        except Exception as e:
+            self.log.emit(f"✖  Could not create {os.path.basename(dest)}: {e}", "red")
+            return False
+
+    def run(self):
+        # Deliberately no shared ExcelEngine here. Each refresh_excel call
+        # starts Excel, recalculates, saves and quits, which guarantees the
+        # next one reads the file back from disk. Holding one instance open
+        # across steps does not: if a book ever fails to close, Excel hands
+        # the next open of that path its stale in-memory copy and saves that
+        # over everything the openpyxl steps wrote in between, which empties
+        # the results. Combine can pool an instance because it drives the
+        # whole sequence itself; these steps cannot.
+        done = 0
+        total = 0
+        try:
+            if self.dnt_source and not self._make_working_copy():
+                self.progress.emit(0, 1, "Error")
+                return
+
             # Lambda functions to wrap step execution
             step2_carbonate = lambda: step2_tosort_carbonate(self.file_path, self.filter_option)
             step2_water = lambda: step2_tosort_water(self.file_path, self.filter_option)
@@ -562,7 +606,6 @@ class MaterialTypeWidget(QWidget):
         # out until there is one - otherwise clicking it silently does nothing.
         self.remove_btn.setEnabled(False)
         self.table.itemSelectionChanged.connect(self._update_remove_btn_state)
-        self.table.currentCellChanged.connect(lambda *a: self._update_remove_btn_state())
         
         btn_layout.addWidget(self.add_btn)
         btn_layout.addWidget(self.remove_btn)
@@ -613,17 +656,26 @@ class MaterialTypeWidget(QWidget):
             
             if i == 0:
                 item.setBackground(highlight_color)
-                item.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+                # Arial like the rest of the app (installed on Mac and Windows,
+                # so Qt never searches for a substitute), sized in pixels to
+                # match the table's 12px stylesheet on every platform.
+                name_font = QFont("Arial")
+                name_font.setPixelSize(12)
+                name_font.setBold(True)
+                item.setFont(name_font)
                 
-                # --- Set the initial text color ---
-                # QColor handles standard string names like "red", "darkblue", etc. perfectly
-                item.setForeground(QColor(current_color))
+                # Same hex the processors write, so the preview matches Excel
+                item.setForeground(QColor("#" + material_color_hex(current_color)))
             
             self.table.setItem(row, i, item)
             
         combo = QComboBox()
-        colors = ["black", "green", "red", "darkblue", "lightblue", "orange", "purple", "brown", "magenta", "teal", "blue", "cyan"]
+        colors = list(MATERIAL_COLORS)
+        if current_color not in colors:
+            colors.append(current_color)  # an older saved name stays selectable
         combo.addItems(colors)
+        for idx, name in enumerate(colors):
+            combo.setItemData(idx, QColor("#" + material_color_hex(name)), Qt.ItemDataRole.ForegroundRole)
         combo.setCurrentText(current_color)
         
         combo.currentTextChanged.connect(self._on_combo_color_changed)
@@ -642,7 +694,7 @@ class MaterialTypeWidget(QWidget):
                     # Grab the item in Column 0 and update its text color
                     item = self.table.item(r, 0)
                     if item:
-                        item.setForeground(QColor(combo.currentText()))
+                        item.setForeground(QColor("#" + material_color_hex(combo.currentText())))
                     break
                     
         # Call your existing save function
@@ -664,21 +716,30 @@ class MaterialTypeWidget(QWidget):
 
     def add_row(self):
         self._loading = True
-        self._insert_table_row()
+        used = [{"color": self.table.cellWidget(r, 6).currentText()}
+                for r in range(self.table.rowCount()) if self.table.cellWidget(r, 6)]
+        self._insert_table_row({"color": next_material_color(used)})
         self._loading = False
         self._save_table_data()
+
+    def _selected_rows(self):
+        """Rows with a selected cell. currentRow() is no use here: Qt keeps
+        the focus cell after a row is deselected, so it never goes back to -1."""
+        return sorted({idx.row() for idx in self.table.selectionModel().selectedIndexes()})
 
     def _update_remove_btn_state(self):
         """Enable "Remove Row" only while a row is actually selected."""
         try:
-            self.remove_btn.setEnabled(self.table.currentRow() >= 0)
+            self.remove_btn.setEnabled(bool(self._selected_rows()))
         except (AttributeError, RuntimeError):
             pass
 
     def remove_row(self):
-        curr = self.table.currentRow()
-        if curr >= 0:
-            self.table.removeRow(curr)
+        rows = self._selected_rows()
+        if rows:
+            for r in reversed(rows):  # bottom-up so indices stay valid
+                self.table.removeRow(r)
+            self.table.clearSelection()
             self._save_table_data()
         self._update_remove_btn_state()
 
@@ -830,13 +891,64 @@ class VersionHistoryDialog(QDialog):
             self.action = 'restore'
             self.accept()
 
+def _shortcut_text(sequence):
+    """'Ctrl+R' as this platform writes it: \u2318R on macOS, Ctrl+R elsewhere."""
+    return QKeySequence(sequence).toString(QKeySequence.SequenceFormat.NativeText)
+
+
+class ShortcutsDialog(QDialog):
+    """A small read-only list of the keyboard shortcuts."""
+
+    def __init__(self, rows, dark_mode, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Keyboard Shortcuts")
+        self.setModal(True)
+
+        if dark_mode:
+            key_style = ("background-color: #2A2B2E; color: #E8EAED; border: 1px solid #555;"
+                         " border-radius: 4px; padding: 3px 8px; font-weight: bold;")
+        else:
+            key_style = ("background-color: #FFFFFF; color: #202124; border: 1px solid #C4C7C5;"
+                         " border-radius: 4px; padding: 3px 8px; font-weight: bold;")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("Keyboard Shortcuts")
+        title.setStyleSheet("font-size: 15px; font-weight: bold;")
+        layout.addWidget(title)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(24)
+        grid.setVerticalSpacing(8)
+        for r, (keys, action) in enumerate(rows):
+            key_label = QLabel(_shortcut_text(keys))
+            key_label.setStyleSheet(key_style)
+            key_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            key_label.setMinimumWidth(56)  # every key box the same width
+            grid.addWidget(QLabel(action), r, 0)
+            grid.addWidget(key_label, r, 1, alignment=Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(grid)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setDefault(True)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+        self.setFixedSize(self.sizeHint().expandedTo(QSize(300, 0)))
+
+
 # ---------------- Main GUI ----------------
 class DataToolApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MRSI - Data Normalization Tool")
-        self.setMinimumSize(730, 825)
-        self.resize(730, 825)
+        self.setMinimumSize(810, 825)
+        self.resize(810, 825)
 
         self.setWindowIcon(app_icon())
 
@@ -872,6 +984,7 @@ class DataToolApp(QWidget):
         QPushButton#clearBtn:hover { background-color: #757575; }
         QPushButton[flat="true"] { background: transparent; color: #333; border: none; }
         QPushButton:hover { background-color: #45A049; }
+        QPushButton:disabled { background-color: #C9CCCF; color: #F4F5F6; }
         QGroupBox { border: 1px solid #DADCE0; border-radius: 6px; margin-top: 12px; padding: 12px; font-weight: bold; background-color: #F7F7F7; }
         QGroupBox#fileGroup { font-size: 14px; }
         QLabel#titleLabel { font-size: 18px; font-weight: bold; color: #111; }
@@ -891,8 +1004,9 @@ class DataToolApp(QWidget):
         QMenu::item:selected { background-color: #E0E0E0; }
         
         /* --- NEW: TABLE STYLING --- */
-        QTableWidget { gridline-color: #cccccc; background-color: white; alternate-background-color: #f5f5f5; color: #333; }
-        QHeaderView::section { background-color: #e0e0e0; color: #333; padding: 4px; border: 1px solid #bfbfbf; font-weight: bold; }
+        QTableWidget { gridline-color: #cccccc; background-color: white; alternate-background-color: #f5f5f5; color: #333; font-size: 12px; }
+        QTableWidget QComboBox { font-size: 12px; }
+        QHeaderView::section { background-color: #e0e0e0; color: #333; padding: 4px; border: 1px solid #bfbfbf; font-weight: bold; font-size: 12px; }
         QTableCornerButton::section { background-color: #e0e0e0; border: 1px solid #bfbfbf; }
         
         /* --- NEW: SLOPE GROUP STYLING --- */
@@ -932,6 +1046,7 @@ class DataToolApp(QWidget):
         QPushButton#clearBtn:hover { background-color: #616161; }
         QPushButton[flat="true"] { background: transparent; color: #DDD; border: none; }
         QPushButton:hover { background-color: #376b2e; }
+        QPushButton:disabled { background-color: #3A3B3E; color: #7E8185; }
         QGroupBox { border: 1px solid #333; border-radius: 6px; margin-top: 12px; padding: 12px; font-weight: bold; background-color: #2A2B2E; }
         QGroupBox#fileGroup { font-size: 14px; }
         QLabel#titleLabel { font-size: 18px; font-weight: bold; color: #FFF; }
@@ -950,8 +1065,9 @@ class DataToolApp(QWidget):
         QMenu::item:selected { background-color: #444; }
         
         /* --- NEW: TABLE STYLING --- */
-        QTableWidget { gridline-color: #444444; background-color: #1E1F22; alternate-background-color: #2A2B2E; color: #E8EAED; }
-        QHeaderView::section { background-color: #333333; color: #E8EAED; padding: 4px; border: 1px solid #444444; font-weight: bold; }
+        QTableWidget { gridline-color: #444444; background-color: #1E1F22; alternate-background-color: #2A2B2E; color: #E8EAED; font-size: 12px; }
+        QTableWidget QComboBox { font-size: 12px; }
+        QHeaderView::section { background-color: #333333; color: #E8EAED; padding: 4px; border: 1px solid #444444; font-weight: bold; font-size: 12px; }
         QTableCornerButton::section { background-color: #333333; border: 1px solid #444444; }
         
         /* --- NEW: SLOPE GROUP STYLING --- */
@@ -992,6 +1108,10 @@ class DataToolApp(QWidget):
             self.setStyleSheet(self.light_stylesheet)
         
         self.init_ui()
+
+        for tab in (self.water_tab, self.carbonate_tab, self.combine_tab):
+            tab.run_state_changed.connect(self.update_run_button_state)
+        self.update_run_button_state()
         
         # --- Keyboard shortcut (QAction attaches to the window reliably) ---
         # We use QAction because it attaches to the window more reliably than QShortcut.
@@ -1029,6 +1149,56 @@ class DataToolApp(QWidget):
         # --- VERSION HISTORY SETUP ---
         self.tab_histories = {0: [], 1: []}  # Tracks history separately per tab
         self.history_temp_dir = tempfile.mkdtemp(prefix="mrsi_history_")
+
+    def plan_dnt_copy(self):
+        """Returns the _DNT path this run should work on, asking if it exists.
+
+        Every run works on a file whose name ends in _DNT, so the file the user
+        dropped is never written to and the name itself records that the tool
+        has been through it. Only decides the name - the copy itself is made by
+        the worker, which has Excel to hand. Returns None if the user backs out.
+        """
+        path = self.file_path
+        root, ext = os.path.splitext(path)
+        if root.lower().endswith("_dnt"):
+            return path
+
+        target = root + "_DNT" + ext
+        if os.path.exists(target):
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle("Working Copy Exists")
+            box.setText(f"{os.path.basename(target)} already exists.")
+            box.setInformativeText(
+                "Overwrite it, or keep it and work on a new numbered copy?"
+            )
+            overwrite_btn = box.addButton("Overwrite", QMessageBox.ButtonRole.DestructiveRole)
+            new_btn = box.addButton("New Copy", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is new_btn:
+                n = 2
+                while os.path.exists(f"{root}_DNT ({n}){ext}"):
+                    n += 1
+                target = f"{root}_DNT ({n}){ext}"
+            elif clicked is not overwrite_btn:
+                return None
+
+        return target
+
+    def use_working_file(self, path):
+        """Points the app at the _DNT copy without disturbing the tab's setup.
+
+        Deliberately no scan_file: re-scanning would refetch the sheet name and
+        rebuild the reference and sample lists, throwing away what the user set.
+        """
+        self.file_path = path
+        if hasattr(self, 'current_tab_index'):
+            self.tab_files[self.current_tab_index] = path
+        self.set_file_label(path)
+        if hasattr(self.active_tab_widget, 'current_file_path'):
+            self.active_tab_widget.current_file_path = path
 
     def save_version(self, description, target_path=None):
         """Creates a copy of the current file in the temp directory specific to this tab."""
@@ -1109,6 +1279,25 @@ class DataToolApp(QWidget):
         super().closeEvent(event)
     
 
+    def report_conversion_error(self, error):
+        """
+        Show a conversion failure, with a shortcut to System Settings when the
+        cause is macOS refusing this app permission to control Excel.
+        """
+        if isinstance(error, ExcelPermissionError):
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Critical)
+            box.setWindowTitle("Excel Permission Needed")
+            box.setText("This app needs permission to control Microsoft Excel.")
+            box.setInformativeText(str(error))
+            open_btn = box.addButton("Open Privacy Settings", QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Close)
+            box.exec()
+            if box.clickedButton() is open_btn:
+                open_automation_settings()
+            return
+        QMessageBox.critical(self, "Error", f"Unable to convert file:\n{error}")
+
     def process_selected_file(self, path):
         """Helper to handle file loading for both Browse and Drop events"""
         if not path: return
@@ -1136,7 +1325,7 @@ class DataToolApp(QWidget):
                         self.active_tab_widget.scan_file(self.file_path)
                         
                 except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Unable to convert file:\n{e}")
+                    self.report_conversion_error(e)
                     self.file_path = None
                     self.set_no_file_label()
                 return
@@ -1151,7 +1340,7 @@ class DataToolApp(QWidget):
             if hasattr(self.active_tab_widget, 'scan_file'):
                 self.active_tab_widget.scan_file(self.file_path)
 
-    # UPDATE existing browse_file to use this new helper:
+    # Browse goes through the same path as drag & drop, so both scan the file.
     def browse_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Excel File", "", "Excel files (*.xlsx *.xls)"
@@ -1424,6 +1613,7 @@ class DataToolApp(QWidget):
         self.clear_log_btn = QPushButton("✖ Clear Log")
         self.clear_log_btn.setObjectName("clearBtn")
         self.clear_log_btn.clicked.connect(self.clear_log)
+        self.clear_log_btn.hide()  # only shown once there is a log to clear
         
         self.button_container.addWidget(self.run_btn)
         self.button_container.addWidget(self.stop_btn)
@@ -1462,7 +1652,14 @@ class DataToolApp(QWidget):
         
         # The lambda ensures it only runs if the Run button is active and visible
         # This prevents accidental double-runs while the thread is already processing!
-        self.run_action.triggered.connect(lambda: self.run_steps() if self.run_btn.isVisible() else None)
+        self.run_action.triggered.connect(
+            lambda: self.run_steps() if self.run_btn.isVisible() and self.run_btn.isEnabled() else None)
+
+        # --- SHOW SHORTCUTS ---
+        self.shortcuts_action = QAction(self)
+        self.shortcuts_action.setShortcut(QKeySequence("Ctrl+/"))
+        self.addAction(self.shortcuts_action)
+        self.shortcuts_action.triggered.connect(self.show_shortcuts)
 
         # Initialize tab state
         self.on_tab_changed(0)
@@ -1480,6 +1677,7 @@ class DataToolApp(QWidget):
         self.resize(self.width(), 700)
         self.run_btn.show()
         self.stop_btn.hide()
+        self.clear_log_btn.hide()
 
     def position_header_buttons(self):
         self.menu_btn.move(self.width() - 50, 10)
@@ -1717,17 +1915,16 @@ class DataToolApp(QWidget):
             self.log_box.hide()
             self.progress.hide()
         else:
-            if self.log_box.toPlainText().strip():
-                self.log_box.show()
+            has_log = bool(self.log_box.toPlainText().strip())
+            self.log_box.setVisible(has_log)
+            self.clear_log_btn.setVisible(has_log)
 
             if not (self.thread and self.thread.isRunning()):
                 self.run_btn.show()
-                self.clear_log_btn.show()
                 self.stop_btn.hide()
             else:
                 self.run_btn.hide()
                 self.stop_btn.show()
-                self.clear_log_btn.show()
                 
         # --- Restore the file state for the newly selected tab ---
         if index in [0, 1]:  # Water or Carbonate tabs
@@ -1742,6 +1939,8 @@ class DataToolApp(QWidget):
             self.history_btn.show()
         else:
             self.history_btn.hide()
+
+        self.update_run_button_state()
         
     def show_menu(self):
         # Pass 'self' so the menu inherits the current stylesheet!
@@ -1755,11 +1954,58 @@ class DataToolApp(QWidget):
         
         # --- Reuse the global action created in __init__ ---
         menu.addAction(self.dark_mode_action)
+
+        shortcuts_menu_action = menu.addAction("Keyboard Shortcuts")
+        shortcuts_menu_action.triggered.connect(self.show_shortcuts)
         
         # Calculate position relative to the BUTTON
         pos = self.menu_btn.mapToGlobal(QPoint(0, self.menu_btn.height()))
         
         menu.exec(pos)
+
+    # ---- Run button state ----
+    def _run_blocker(self):
+        """Why Run cannot start right now, or None when it can."""
+        tab = self.active_tab_widget
+        if tab is None or tab is self.advanced_settings_tab:
+            return None  # Run is hidden there anyway
+        if tab is self.combine_tab:
+            return tab.run_blocker()
+        if not self.file_path:
+            return "Select or drop a file first"
+        if self.file_path.lower().endswith(".xls"):
+            return "Convert the .xls file to .xlsx first"
+        return tab.run_blocker() if hasattr(tab, "run_blocker") else None
+
+    def update_run_button_state(self):
+        """Grey out Run (and Refresh) with a hover hint instead of popping up
+        a warning after the click."""
+        if not hasattr(self, "run_btn"):
+            return
+        reason = self._run_blocker()
+        self.run_btn.setEnabled(reason is None)
+        self.run_btn.setToolTip(reason or f"Run the selected steps ({_shortcut_text('Ctrl+R')})")
+
+        has_file = bool(self.file_path)
+        for tab in (self.water_tab, self.carbonate_tab):
+            btn = getattr(tab, "fetch_btn", None)
+            if btn is not None:
+                btn.setEnabled(has_file)
+                btn.setToolTip("Re-read the materials from the sheet" if has_file
+                               else "Select or drop a file first")
+
+    # ---- Keyboard shortcuts ----
+    def show_shortcuts(self):
+        """Lists the keyboard shortcuts (the settings unlock stays a secret)."""
+        rows = [("Ctrl+1", "Water tab"), ("Ctrl+2", "Carbonate tab")]
+        if self.combine_tab_index != -1:
+            rows.append(("Ctrl+3", "Combine Data tab"))
+        rows += [
+            ("Ctrl+R", "Run selected steps"),
+            ("Ctrl+D", "Toggle dark mode"),
+            ("Ctrl+/", "Show this list"),
+        ]
+        ShortcutsDialog(rows, self.dark_mode, self).exec()
 
     def show_about(self):
         """Displays the custom About dialog."""
@@ -1780,6 +2026,13 @@ class DataToolApp(QWidget):
             self.water_tab.setStyleSheet(self.light_stylesheet)
             self.combine_tab.setStyleSheet(self.light_stylesheet)
             self.advanced_settings_tab.setStyleSheet(self.light_stylesheet)
+        
+        # Widgets that paint themselves rather than relying on the stylesheet
+        # have to be told the theme changed.
+        for tab in (self.carbonate_tab, self.water_tab):
+            bar = getattr(tab, "block_bar", None)
+            if bar is not None:
+                bar.refresh_theme()
     
     # ... (File handling methods) ...
     def set_no_file_label(self):
@@ -1789,6 +2042,7 @@ class DataToolApp(QWidget):
         self.remove_btn.hide()
         self.open_file_btn.hide()
         self.open_folder_btn.hide()
+        self.update_run_button_state()
 
     def set_file_label(self, path):
         fname = os.path.basename(path)
@@ -1798,6 +2052,7 @@ class DataToolApp(QWidget):
         self.remove_btn.show()
         self.open_file_btn.show()
         self.open_folder_btn.show()
+        self.update_run_button_state()
 
     def remove_file(self):
         self.file_path = None
@@ -1816,39 +2071,6 @@ class DataToolApp(QWidget):
             if hasattr(self.active_tab_widget, 'ref_list'):
                 self.active_tab_widget.ref_list.clear()     
                 self.active_tab_widget.sample_list.clear()  
-
-    def browse_file(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Excel File", "", "Excel files (*.xlsx *.xls)"
-        )
-        if not path:
-            return
-
-        if path.lower().endswith(".xls"):
-            reply = QMessageBox.question(
-                self, "Convert to .xlsx?",
-                ("The selected file is in the older .xls format. Convert now?"),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                try:
-                    new_path = convert_xls_to_xlsx(path)
-                    QMessageBox.information(self, "Success", f"Converted to: {os.path.basename(new_path)}")
-                    self.file_path = new_path
-                    self.set_file_label(self.file_path)
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Unable to convert file:\n{e}")
-                    self.file_path = None
-                    self.set_no_file_label()
-                return
-            else:
-                self.file_path = None
-                self.set_no_file_label()
-                return
-        else:
-            self.file_path = path
-            self.set_file_label(self.file_path)
 
     def open_file(self):
         if not self.file_path: return
@@ -1935,15 +2157,15 @@ class DataToolApp(QWidget):
         self.on_log("Processing complete.", "green")
         self.run_btn.show()
         self.stop_btn.hide()
-        self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(True)
+        self.update_run_button_state()
 
     def on_thread_stopped(self):
         self.on_log("🛑 **Process stopped by user.**\n", "red")
         self.run_btn.show()
         self.stop_btn.hide()
-        self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(True)
+        self.update_run_button_state()
         self.progress.setStyleSheet("QProgressBar::chunk { background-color: #F44336; }")
 
     def run_steps(self):
@@ -1963,6 +2185,7 @@ class DataToolApp(QWidget):
 
             # Setup UI for running
             self.log_box.show()
+            self.clear_log_btn.show()
             self.progress.show()
             self.resize(self.width(), max(self.height(), 950)) 
             self.log_box.clear()
@@ -2009,8 +2232,17 @@ class DataToolApp(QWidget):
                 adv_params = self.active_tab_widget.get_advanced_parameters()
                 
                 # Push them to your global settings memory (using .get() to prevent WaterTab crashes)
+                settings.set_setting("CALC_CARBONATE", adv_params.get("calc_carbonate", True))
                 settings.set_setting("CALC_YIELD", adv_params.get("calc_yield", False))
                 settings.set_setting("CALC_CO2", adv_params.get("calc_co2", False))
+                if adv_params.get("block_order"):
+                    settings.set_setting("BLOCK_ORDER", adv_params["block_order"])
+                
+                if not (adv_params.get("calc_carbonate", True) or adv_params.get("calc_co2", False)):
+                    QMessageBox.warning(
+                        self, "Nothing to Normalize",
+                        "Switch on the Carbonate or the CO\u2082 block before running.")
+                    return
                 settings.set_setting("ACTIVE_REFERENCES", adv_params.get("references", []))
                 settings.set_setting("ACTIVE_SAMPLES", adv_params.get("samples", []))
                 
@@ -2025,8 +2257,20 @@ class DataToolApp(QWidget):
             QMessageBox.warning(self, "Error", "Please select at least one step to run.")
             return
 
+        # Steps run against a _DNT copy, never the dropped file itself. The
+        # parameters above are already in hand, so the switch costs the tab
+        # nothing.
+        working_path = self.plan_dnt_copy()
+        if not working_path:
+            return
+        dnt_source = None
+        if working_path != self.file_path:
+            dnt_source = self.file_path
+            self.use_working_file(working_path)
+
         # UI State Change
         self.log_box.show()
+        self.clear_log_btn.show()
         self.progress.show()
         self.resize(self.width(), max(self.height(), 950)) 
         self.log_box.clear()
@@ -2041,10 +2285,12 @@ class DataToolApp(QWidget):
         self.progress.setStyleSheet("QProgressBar::chunk { background-color: #3f51b5; }")
 
         # Add Thread Log Connection
-        self.save_version("Auto-backup before running steps") 
+        self.save_version("Auto-backup before running steps",
+                          target_path=dnt_source or self.file_path)
 
         # Start Thread
-        self.thread = WorkerThread(self.file_path, steps, sheet_name, filter_opt, tab_type)
+        self.thread = WorkerThread(self.file_path, steps, sheet_name, filter_opt, tab_type,
+                                   dnt_source=dnt_source)
         self.thread.log.connect(self.on_log)
         self.thread.progress.connect(self.on_progress)
         self.thread.finished.connect(self.on_thread_done)
@@ -2081,7 +2327,8 @@ class DataToolApp(QWidget):
         """Triggered when the version check is complete."""
         if has_update:
             # Call the shared custom dialog imported from updater.py
-            dialog = UpdateAvailableDialog(CURRENT_VERSION, latest_version, self)
+            dialog = UpdateAvailableDialog(CURRENT_VERSION, latest_version, self,
+                                           notes=release_notes(download_url))
             
             # exec() blocks until the user clicks one of the buttons
             if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -2101,6 +2348,9 @@ class DataToolApp(QWidget):
 
     def start_update_download(self, url):
         """Sets up the UI progress dialog and starts the download thread."""
+        if not is_installed_build():
+            self.show_toast("Running from source: updates install into the packaged app only.")
+            return
         # Create a blocking progress dialog
         self.update_progress_dialog = QProgressDialog("Downloading update...", None, 0, 100, self)
         self.update_progress_dialog.setWindowTitle("Updating MRSI DNT")

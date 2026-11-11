@@ -224,11 +224,33 @@ class FileTableWidget(QTableWidget):
 # =========================================================================
             
 class CombineTab(QWidget):
+    # Anything that changes whether Run can start (mode, files, output path).
+    run_state_changed = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)  
         self._sheet_workers = []  
         self.init_ui()
+        self.output_path_input.textChanged.connect(lambda *_: self.run_state_changed.emit())
+        self.radio_new_file.toggled.connect(lambda *_: self.run_state_changed.emit())
+
+    def run_blocker(self):
+        """Why Run cannot start yet, or None. Checks that need the disk
+        (output folder exists, output is not an input) still run on click."""
+        if not (self.btn_water.isChecked() or self.btn_carbonate.isChecked()):
+            return "Choose Water or Carbonate first"
+        if self.file_table.rowCount() == 0:
+            return "Add at least one file to combine"
+        if any(self.file_table.cellWidget(r, 1) is not None
+               for r in range(self.file_table.rowCount())):
+            return "Wait for the files to finish loading"
+        out_path = self.output_path_input.text().strip()
+        if not out_path:
+            return "Choose where to save the combined file"
+        if self.radio_append_file.isChecked() and not os.path.exists(out_path):
+            return "Choose an existing combined file to append to"
+        return None
 
     def init_ui(self):
         # 1. Main outer layout (flush with the tab borders)
@@ -537,6 +559,7 @@ class CombineTab(QWidget):
                 worker.start()
             
         self._update_footer_visibility()
+        self.run_state_changed.emit()
 
     def _cleanup_worker(self, worker):
         if worker in self._sheet_workers:
@@ -567,12 +590,14 @@ class CombineTab(QWidget):
                 samp_list.addItems(samples)
                 self.file_table.setCellWidget(row, 3, samp_list)
                 break
+        self.run_state_changed.emit()
 
     def _remove_specific_row(self, item):
         row = self.file_table.row(item)
         if row >= 0:
             self.file_table.removeRow(row)
         self._update_footer_visibility()
+        self.run_state_changed.emit()
 
     def add_files(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -585,10 +610,12 @@ class CombineTab(QWidget):
         rows = sorted(set(index.row() for index in self.file_table.selectedIndexes()), reverse=True)
         for row in rows:
             self.file_table.removeRow(row)
+        self.run_state_changed.emit()
 
     def clear_all(self):
         self.file_table.setRowCount(0)
         self._update_footer_visibility()
+        self.run_state_changed.emit()
 
     def _toggle_output_mode(self):
         if self.radio_new_file.isChecked():
@@ -646,6 +673,7 @@ class CombineTab(QWidget):
                 else:
                     self.btn_water.setChecked(True)
                     self.carb_settings_group.hide()
+        self.run_state_changed.emit()
 
     def get_run_parameters(self):
         if not self.btn_water.isChecked() and not self.btn_carbonate.isChecked():

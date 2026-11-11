@@ -23,7 +23,7 @@ from pathlib import Path
 import sys
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QIcon, QPixmap
+from PyQt6.QtGui import QGuiApplication, QIcon, QPixmap
 
 __all__ = ["ASSETS_DIR", "asset_path", "logo_pixmap", "app_icon"]
 
@@ -65,12 +65,22 @@ def logo_pixmap(size: int | None = None) -> QPixmap:
     pixmap = QPixmap(str(asset_path("mrsi_logo.png")))
     if pixmap.isNull() or size is None:
         return pixmap
-    return pixmap.scaled(
-        size,
-        size,
+
+    # Scale to the screen's physical pixels, not the logical size: on a Retina
+    # (2x) display a 70x70 pixmap is stretched to 140 pixels and looks soft.
+    # Never upscale past the source image; the pixel ratio then absorbs the
+    # difference so the logo still occupies `size` logical pixels.
+    app = QGuiApplication.instance()
+    dpr = app.devicePixelRatio() if app is not None else 1.0
+    target = max(1, min(round(size * dpr), max(pixmap.width(), pixmap.height())))
+    scaled = pixmap.scaled(
+        target,
+        target,
         Qt.AspectRatioMode.KeepAspectRatio,
         Qt.TransformationMode.SmoothTransformation,
     )
+    scaled.setDevicePixelRatio(target / size)
+    return scaled
 
 
 def app_icon() -> QIcon:

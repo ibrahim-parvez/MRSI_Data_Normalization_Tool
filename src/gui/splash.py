@@ -1,11 +1,13 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QProgressBar, QFrame,
                              QMessageBox, QDialog, QApplication)
-from PyQt6.QtCore import Qt, pyqtSignal
+import os
+
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QPalette
 
 from utils.resources import logo_pixmap
 from utils.updater import (AutoUpdater, CURRENT_VERSION, UpdateAvailableDialog,
-                           apply_update_and_restart)
+                           apply_update_and_restart, is_installed_build, release_notes)
         
 class StartupSplashScreen(QWidget):
     # Signal emitted when the update check is done
@@ -104,6 +106,12 @@ class StartupSplashScreen(QWidget):
         self.progress_bar.setValue(value)
 
     def start_update_check(self):
+        # Only the installed app can update itself, and a CI smoke test must
+        # not wait on the network. Deferred so main.py has connected
+        # startup_ready before it fires.
+        if not is_installed_build() or os.environ.get("MRSI_SMOKE_TEST"):
+            QTimer.singleShot(0, self.proceed_with_startup)
+            return
         self.updater_thread = AutoUpdater(mode="check")
         self.updater_thread.check_finished.connect(self.on_check_finished)
         self.updater_thread.error_occurred.connect(self.on_error)
@@ -112,7 +120,8 @@ class StartupSplashScreen(QWidget):
     def on_check_finished(self, has_update, latest_version, download_url):
         if has_update:
             # Open our custom styled dialog
-            dialog = UpdateAvailableDialog(CURRENT_VERSION, latest_version, self)
+            dialog = UpdateAvailableDialog(CURRENT_VERSION, latest_version, self,
+                                           notes=release_notes(download_url))
             
             # If they click "Update Now"
             if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -139,7 +148,8 @@ class StartupSplashScreen(QWidget):
     def on_download_finished(self, download_path):
         if download_path:
             self.loading_text.setText("Installing update and restarting...")
-            apply_update_and_restart(download_path)
+            if apply_update_and_restart(download_path) is False:
+                self.proceed_with_startup()
         else:
             self.proceed_with_startup()
 

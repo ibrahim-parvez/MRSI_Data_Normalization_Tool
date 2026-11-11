@@ -1,0 +1,5 @@
+# Build-time dependencies: everything in requirements.txt, plus PyInstaller.
+# Used by the GitHub release workflow and by `python packaging/build.py`.
+-r requirements.txt
+
+pyinstaller>=6.16,<7         # 6.16 = the version the current releases were built with

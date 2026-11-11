@@ -1,0 +1,48 @@
+# Quick safety net on every push: on both Windows and macOS, install the
+# dependencies, make sure every file compiles, and start the app (offscreen)
+# to confirm it opens its main window. Nothing is built or released here;
+# see release.yml for that.
+
+name: Checks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "packaging/**"
+      - "requirements*.txt"
+      - ".github/workflows/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  start-up:
+    name: Starts on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Compile every file
+        run: python -m compileall -q src packaging
+
+      - name: Start the app
+        run: python packaging/release.py smoke --source

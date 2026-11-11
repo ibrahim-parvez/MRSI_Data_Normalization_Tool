@@ -1,11 +1,12 @@
 import openpyxl
 import re
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QLineEdit, 
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QCheckBox, QLineEdit,
     QComboBox, QGroupBox, QFrame, QLabel, QPushButton, QListWidget, QAbstractItemView, QMessageBox, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 import utils.settings as settings
+from utils.colors import next_material_color
 
 # =========================================================================
 # BACKGROUND WORKER FOR FETCHING SHEET NAMES
@@ -37,6 +38,8 @@ class SheetFetcherWorker(QThread):
 # =========================================================================
 class WaterTab(QWidget):
     references_updated = pyqtSignal()
+    # Anything that changes whether Run can start (steps ticked, blocks on).
+    run_state_changed = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -65,7 +68,10 @@ class WaterTab(QWidget):
         
         self._create_step_ui()
         self._create_settings_ui()
-        self.refresh_step_labels() 
+        self.refresh_step_labels()
+
+        for cb in self.step_cbs + [self.select_all_cb]:
+            cb.toggled.connect(lambda *_: self.run_state_changed.emit())
 
     def _add_divider(self, layout):
         divider = QFrame()
@@ -82,7 +88,6 @@ class WaterTab(QWidget):
 
         # Top: Select all toggle
         top_row = QHBoxLayout()
-        top_row.addSpacing(10)
         self.select_all_cb = QCheckBox("Select All")
         
         self.select_all_cb.toggled.connect(self.toggle_select_all)
@@ -137,22 +142,21 @@ class WaterTab(QWidget):
         settings_layout = QVBoxLayout()
         settings_group.setLayout(settings_layout)
         
-        # 1. Sheet Name Entry
-        sheet_row = QHBoxLayout()
-        self.sheet_entry = QLineEdit("") 
+        # 1. Sheet name and 2. To Sort filter share a grid, so both inputs
+        # start at the same x whatever the label widths.
+        form = QGridLayout()
+        form.setHorizontalSpacing(10)
+        form.setColumnStretch(1, 1)
+        self.sheet_entry = QLineEdit("")
         self.sheet_entry.setPlaceholderText("Sheet name")
-        sheet_row.addWidget(QLabel("<b>Initial Sheet Name:</b>"))
-        sheet_row.addWidget(self.sheet_entry)
-        settings_layout.addLayout(sheet_row)
-
-        # 2. To Sort Filter
-        filter_row = QHBoxLayout()
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["Last 6", "Last 6 Outliers Excl.", "all", "Amp 44", "delta", "end 11", "ref avg", "sparkline", "start 6"]) 
+        self.filter_combo.addItems(["Last 6", "Last 6 Outliers Excl.", "all", "Amp 44", "delta", "end 11", "ref avg", "sparkline", "start 6"])
         self.filter_combo.setCurrentText("Last 6")
-        filter_row.addWidget(QLabel("<b>To Sort Filter:</b>"))
-        filter_row.addWidget(self.filter_combo)
-        settings_layout.addLayout(filter_row)
+        form.addWidget(QLabel("<b>Initial Sheet Name:</b>"), 0, 0)
+        form.addWidget(self.sheet_entry, 0, 1)
+        form.addWidget(QLabel("<b>To Sort Filter:</b>"), 1, 0)
+        form.addWidget(self.filter_combo, 1, 1)
+        settings_layout.addLayout(form)
 
         # --- Freeze Pane Checkbox ---
         freeze_row = QHBoxLayout()
@@ -247,11 +251,10 @@ class WaterTab(QWidget):
 
     def fetch_unique_materials(self):
         """Scans the designated sheet for unique materials in the Identifier column."""
-        self._is_fetching = True
-        
+        # Refresh is greyed out until a file is loaded; this is only a guard.
         if not self.current_file_path:
-            QMessageBox.warning(self, "No File", "Please select or drop a file first.")
             return
+        self._is_fetching = True
             
         sheet_name = self.sheet_entry.text().strip()
         
@@ -309,8 +312,10 @@ class WaterTab(QWidget):
                     wb.close()
                 except Exception:
                     pass
+            # Reset on every path, early returns included: left set, it
+            # silently blocks every later reference sync.
+            self._is_fetching = False
 
-        self._is_fetching = False
         self.sync_references_to_settings()
     
     def refresh_step_labels(self):
@@ -337,6 +342,13 @@ class WaterTab(QWidget):
         self.select_all_cb.blockSignals(True)
         self.select_all_cb.setChecked(all_checked)
         self.select_all_cb.blockSignals(False)
+
+    def run_blocker(self):
+        """Why Run cannot start from this tab yet, or None. The file itself is
+        checked by the main window."""
+        if not any(cb.isChecked() for cb in self.step_cbs):
+            return "Select at least one step to run"
+        return None
 
     def get_run_parameters(self):
         """Returns the steps dictionary, sheet name, and filter option."""
@@ -405,7 +417,7 @@ class WaterTab(QWidget):
         for ref in refs_in_ui:
             if is_heco2_exception(ref): continue # Ignore HeCO2
             if not self._is_mapped_to_existing(ref, mats):
-                mats.append({"col_c": ref, "col_d": "", "col_e": "", "col_f": "", "col_g": "", "col_h": "", "color": "black", "bold": False})
+                mats.append({"col_c": ref, "col_d": "", "col_e": "", "col_f": "", "col_g": "", "col_h": "", "color": next_material_color(mats), "bold": False})
                 changed = True
                 
         if changed:

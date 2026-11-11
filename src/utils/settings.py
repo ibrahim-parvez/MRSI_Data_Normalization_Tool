@@ -10,9 +10,16 @@ _SETTINGS_CONFIG = {
     # Empty means fall back to the generic "Custom Temp" wording.
     "CO2_CUSTOM_LABEL": "",
 
+    # Normalization blocks: which are drawn, and their left-to-right order.
+    # Yield is never first - it has no reference box for the top-left corner.
+    "CALC_CARBONATE": True,
+    "CALC_YIELD": False,
+    "CALC_CO2": False,
+    "BLOCK_ORDER": ["Carbonate", "Yield", "CO2"],
+
     # Toggle for Stdev
-    "STDEV_THRESHOLD_ENABLED": False,
-    "STDEV_THRESHOLD": 0.08,
+    "STDEV_THRESHOLD_ENABLED": True,
+    "STDEV_THRESHOLD": 0.1,
     
     # Outlier Configuration
     "OUTLIER_SIGMA": 2,                        
@@ -21,6 +28,9 @@ _SETTINGS_CONFIG = {
     # Split Calculation Modes
     "CALC_MODE_STEP3": "Last 6",               
     "CALC_MODE_STEP7": "All Values",           
+
+    # Yield: the compound used for reference materials and for samples
+    "YIELD_COMPOUNDS": {"ref": "CaCO3", "samp": "MnCO3"},
 
     # Materials split by Type
     "REFERENCE_MATERIALS": {
@@ -64,6 +74,18 @@ _SETTINGS_CONFIG = {
         ],
     }
 }
+
+# The values above, as shipped. Reset to Default reads them from here, so the
+# defaults live in one place and a reset always matches a fresh launch.
+_DEFAULTS = copy.deepcopy(_SETTINGS_CONFIG)
+
+
+def reset_to_defaults(keys):
+    """Put each setting in `keys` back to its shipped default."""
+    for key in keys:
+        if key in _DEFAULTS:
+            _SETTINGS_CONFIG[key] = copy.deepcopy(_DEFAULTS[key])
+
 
 def get_setting(key, sub_key=None):
     """
@@ -132,28 +154,46 @@ def get_reference_names(material_type="Carbonate"):
 # --- AUTO-SAVE & FILE MANAGEMENT LOGIC ---
 
 _AUTO_SAVES = []
+_MAX_AUTO_SAVES = 10
 
-def auto_save():
-    """Creates a timestamped auto-save of the current settings."""
-    global _AUTO_SAVES
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
-    # Insert at the beginning of the list
-    _AUTO_SAVES.insert(0, {"timestamp": timestamp, "data": copy.deepcopy(_SETTINGS_CONFIG)})
-    # Keep only the last 5 saves to avoid memory bloat
-    if len(_AUTO_SAVES) > 5:
-        _AUTO_SAVES.pop()
+
+def auto_save(note="Auto-save"):
+    """Snapshot the current settings, newest first.
+
+    Skipped when nothing changed since the last snapshot, so leaving the
+    Advanced tab repeatedly does not fill the list with identical entries.
+    """
+    if _AUTO_SAVES and _AUTO_SAVES[0]["data"] == _SETTINGS_CONFIG:
+        return
+    now = datetime.datetime.now()
+    _AUTO_SAVES.insert(0, {
+        "time": now,
+        "timestamp": now.strftime("%Y-%m-%d %I:%M:%S %p"),
+        "note": note,
+        "data": copy.deepcopy(_SETTINGS_CONFIG),
+    })
+    del _AUTO_SAVES[_MAX_AUTO_SAVES:]
+
 
 def get_auto_saves():
-    """Returns a list of timestamps for the auto-saves."""
-    return [qs["timestamp"] for qs in _AUTO_SAVES]
+    """Snapshots, newest first: dicts with time, timestamp, note and data."""
+    return [dict(s, data=copy.deepcopy(s["data"])) for s in _AUTO_SAVES]
+
+
+def get_current_settings():
+    """A copy of every current setting, for comparing against a snapshot."""
+    return copy.deepcopy(_SETTINGS_CONFIG)
+
 
 def restore_auto_save(index):
-    """Restores the settings from a specific auto-save index."""
-    global _SETTINGS_CONFIG
-    if 0 <= index < len(_AUTO_SAVES):
-        _SETTINGS_CONFIG.update(copy.deepcopy(_AUTO_SAVES[index]["data"]))
-        return True
-    return False
+    """Restore a snapshot. The current settings are snapshotted first, so a
+    restore can itself be undone from the same list."""
+    if not 0 <= index < len(_AUTO_SAVES):
+        return False
+    data = copy.deepcopy(_AUTO_SAVES[index]["data"])
+    auto_save("Before restoring")
+    _SETTINGS_CONFIG.update(data)
+    return True
 
 def export_to_file(filepath):
     """Exports the current settings dictionary to a JSON file."""
@@ -172,17 +212,9 @@ def import_from_file(filepath):
             data = json.load(f)
         
         if isinstance(data, dict):
+            auto_save("Before import")  # so an import can be undone
             _SETTINGS_CONFIG.update(data)
             return True, "Settings imported successfully."
         return False, "Invalid file format. Expected a JSON dictionary."
     except Exception as e:
         return False, f"Import failed: {str(e)}"
-    
-def get_auto_save_data(row_index):
-    """
-    Returns the dictionary of settings associated with a specific auto-save.
-    """
-    try:
-        return _AUTO_SAVES[row_index].get("data", {}) 
-    except (IndexError, KeyError):
-        return None

@@ -15,6 +15,15 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(SPECPATH).parent
+
+# Shown in Finder's Get Info. src/version.py is the single source; the
+# release workflow stamps it before building.
+import re
+APP_VERSION = re.search(
+    r'^__version__ = "([^"]+)"',
+    (PROJECT_ROOT / "src" / "version.py").read_text(encoding="utf-8"),
+    re.MULTILINE,
+).group(1)
 ASSETS = PROJECT_ROOT / "assets" / "images"
 
 IS_WINDOWS = sys.platform == "win32"
@@ -114,9 +123,49 @@ else:
         name=APP_NAME,
     )
 
+    # macOS gates Apple Events behind TCC: the first time the app drives
+    # Microsoft Excel (xlwings -> appscript), the system shows a consent
+    # prompt - but only if the bundle declares why it wants the permission.
+    # With no NSAppleEventsUsageDescription the prompt is skipped and every
+    # event is refused outright, which surfaces from appscript as:
+    #
+    #     OSERROR: -1743
+    #     MESSAGE: The user has declined permission.
+    #
+    # The folder strings cover the same gate for the locations the tool reads
+    # and writes (Desktop is the default output for a Combine run).
+    info_plist = {
+        "NSAppleEventsUsageDescription": (
+            f"{APP_NAME} controls Microsoft Excel to convert .xls files, "
+            "recalculate formulas and save your workbooks."
+        ),
+        "NSDesktopFolderUsageDescription": (
+            f"{APP_NAME} reads and writes normalization workbooks on your Desktop."
+        ),
+        "NSDocumentsFolderUsageDescription": (
+            f"{APP_NAME} reads and writes normalization workbooks in your Documents folder."
+        ),
+        "NSDownloadsFolderUsageDescription": (
+            f"{APP_NAME} reads and writes normalization workbooks in your Downloads folder."
+        ),
+        # Data for this tool often lives on a USB stick or a mounted lab
+        # share, and both are gated separately from the home folders.
+        "NSRemovableVolumesUsageDescription": (
+            f"{APP_NAME} needs access to open and save workbooks on USB and "
+            "other removable drives."
+        ),
+        "NSNetworkVolumesUsageDescription": (
+            f"{APP_NAME} needs access to open and save workbooks on network "
+            "drives and mounted shares."
+        ),
+        "NSHighResolutionCapable": True,
+    }
+
     app = BUNDLE(
         coll,
         name=f"{APP_NAME}.app",
         icon=icon,
         bundle_identifier=BUNDLE_ID,
+        version=APP_VERSION,
+        info_plist=info_plist,
     )

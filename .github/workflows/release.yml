@@ -1,0 +1,147 @@
+# Builds the app and installer on real Windows and macOS machines, checks
+# that each built app starts, and publishes a GitHub release. Installed apps
+# see the new release on their next launch and offer to update.
+#
+# To release: GitHub -> Actions -> Release -> Run workflow, pick patch /
+# minor / major, type what changed, and press Run. Nothing is tagged or
+# published unless both platforms build and start successfully.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (patch = fixes, minor = new features, major = big changes)"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      notes:
+        description: "What changed, shown to users in the update prompt. Separate items with semicolons ( ; )"
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+# Never run two releases at once: they would race for the same version number.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Work out the version
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+      sha: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # all tags, to find the latest version
+      - id: next
+        run: |
+          VERSION=$(python3 packaging/release.py next "${{ inputs.bump }}")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "### Releasing v$VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: version
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [windows-latest, macos-latest]   # macos-latest is Apple Silicon (arm64)
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+
+      - name: Stamp the version
+        run: python packaging/release.py set ${{ needs.version.outputs.version }}
+
+      - name: Build app and installer
+        run: python packaging/build.py all
+
+      - name: Check the built app starts
+        run: python packaging/release.py smoke
+
+      - name: Package for release
+        run: python packaging/release.py package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ runner.os }}
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          path: assets
+          merge-multiple: true
+
+      - name: Commit the version bump and tag it
+        run: |
+          python3 packaging/release.py set "$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git diff --quiet || git commit -am "Release v$VERSION"
+          git tag "v$VERSION"
+          # Fails (and publishes nothing) if main moved on during the build.
+          git push --atomic origin HEAD:main "v$VERSION"
+
+      - name: Write release notes
+        env:
+          RELEASE_NOTES: ${{ inputs.notes }}
+        run: python3 packaging/release.py notes > notes.md
+
+      - name: Publish v${{ env.VERSION }}
+        run: |
+          gh release create "v$VERSION" \
+            "assets/MRSI.Data.Normalization.Tool.exe" \
+            "assets/MRSI.Data.Normalization.Tool.app.zip" \
+            --title "Release v$VERSION - MRSI Data Normalization Tool" \
+            --notes-file notes.md \
+            --latest
+
+      - name: Refresh the Installer release
+        run: |
+          if ! gh release view Installer > /dev/null 2>&1; then
+            gh release create Installer --title "Installer - MRSI Data Normalization Tool" \
+              --notes "Download the installer for your computer below. It always installs the newest version." \
+              --latest=false
+          fi
+          gh release upload Installer \
+            "assets/MRSI_DNT_Installer.exe" \
+            "assets/MRSI_DNT_Installer.app.zip" \
+            --clobber
+          echo "Published v$VERSION and refreshed the Installer release." >> "$GITHUB_STEP_SUMMARY"

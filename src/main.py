@@ -11,6 +11,7 @@ longer than that, so doing it inline made a healthy startup look like a hang.
 """
 
 import ctypes
+import os
 import sys
 import time
 
@@ -32,6 +33,10 @@ MIN_DURATION = 1.5
 
 # How often the progress bar repaints while the worker thread imports.
 PROGRESS_TICK_MS = 30
+
+# Set by the release workflow to check that a freshly built app really starts:
+# open the main window, report, and quit on our own with no dialogs.
+SMOKE_TEST = bool(os.environ.get("MRSI_SMOKE_TEST"))
 
 # Windows groups taskbar buttons by this id; without it the app inherits
 # Python's own icon instead of ours.
@@ -141,6 +146,10 @@ def _load_application(app: QApplication, splash: StartupSplashScreen) -> None:
     def on_failed(message: str) -> None:
         progress.finish()
         splash.close()
+        if SMOKE_TEST:
+            print(f"SMOKE TEST FAILED: {message}", file=sys.stderr, flush=True)
+            app.exit(1)
+            return
         QMessageBox.critical(
             None,
             "Startup Failed",
@@ -181,6 +190,9 @@ def _reveal(splash: StartupSplashScreen) -> None:
         window.show()
         window.raise_()
         window.activateWindow()
+        if SMOKE_TEST:
+            print("SMOKE TEST OK: main window opened", flush=True)
+            QTimer.singleShot(1500, QApplication.instance().quit)
 
 
 def main() -> None:

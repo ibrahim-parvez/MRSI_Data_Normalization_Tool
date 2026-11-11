@@ -30,12 +30,33 @@ from PyQt6.QtGui import QFont, QDesktopServices
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from utils.resources import app_icon, logo_pixmap
+from version import parse_version
 
 # ==========================================
-# CONFIGURATION - CHANGE THESE!
+# CONFIGURATION
 # ==========================================
 GITHUB_OWNER = "ibrahim-parvez"
 GITHUB_REPO = "MRSI_Data_Normalization_Tool"
+
+# The app file each release carries per platform (see utils/updater.py).
+APP_ASSET_NAMES = {
+    "win32": "MRSI.Data.Normalization.Tool.exe",
+    "darwin": "MRSI.Data.Normalization.Tool.app.zip",
+}
+
+
+def pick_app_asset(assets):
+    """This platform's app file in a release, or None. Never an installer."""
+    wanted = APP_ASSET_NAMES.get(sys.platform, APP_ASSET_NAMES["win32"])
+    for asset in assets:
+        if asset.get("name") == wanted:
+            return asset
+    suffix = ".exe" if sys.platform == "win32" else ".app.zip"
+    for asset in assets:
+        name = asset.get("name", "").lower()
+        if name.endswith(suffix) and "installer" not in name:
+            return asset
+    return None
 
 # ==========================================
 # WORKER THREADS
@@ -45,17 +66,25 @@ class FetchReleasesThread(QThread):
     error_occurred = pyqtSignal(str)
 
     def run(self):
-        api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases"
+        api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases?per_page=50"
         req = urllib.request.Request(api_url, headers={'User-Agent': 'MRSI-Installer'})
         ssl_context = ssl.create_default_context(cafile=certifi.where())
         
         try:
             with urllib.request.urlopen(req, context=ssl_context) as response:
                 data = json.loads(response.read().decode('utf-8'))
-                valid_releases = [r for r in data if r.get('assets')]
-                
+                # Only real versions with a file for this platform, newest
+                # first. Skips the "Installer" release and any drafts.
+                valid_releases = [
+                    r for r in data
+                    if not r.get('draft') and not r.get('prerelease')
+                    and parse_version(r.get('tag_name'))
+                    and pick_app_asset(r.get('assets', []))
+                ]
+                valid_releases.sort(key=lambda r: parse_version(r['tag_name']), reverse=True)
+
                 if not valid_releases and data:
-                    self.error_occurred.emit("Found releases, but no files are attached to them.")
+                    self.error_occurred.emit("Found releases, but none has a download for this computer.")
                 else:
                     self.releases_fetched.emit(valid_releases)
                     
@@ -156,7 +185,9 @@ class DownloadThread(QThread):
                     with zipfile.ZipFile(self.save_path, 'r') as zip_ref:
                         zip_ref.extractall(temp_extract_dir)
                 else:
-                    subprocess.run(["unzip", "-q", "-o", self.save_path, "-d", temp_extract_dir], check=True)
+                    # ditto restores the .app's framework symlinks exactly as
+                    # the release workflow packed them; plain unzip can not.
+                    subprocess.run(["ditto", "-x", "-k", self.save_path, temp_extract_dir], check=True)
                     macosx_dir = os.path.join(temp_extract_dir, "__MACOSX")
                     if os.path.exists(macosx_dir):
                         shutil.rmtree(macosx_dir)
@@ -587,34 +618,7 @@ class InstallerApp(QWidget):
 
     # --- OS Asset Selection ---
     def get_os_asset(self, release_data):
-        assets = release_data.get("assets", [])
-        is_windows = sys.platform == "win32"
-        
-        # Sort files to prevent Windows from grabbing the Mac .zip
-        win_files = []
-        mac_files = []
-        
-        for asset in assets:
-            name = asset["name"].lower()
-            if ".app" in name or "mac" in name or name.endswith(".dmg") or name.endswith(".pkg"):
-                mac_files.append(asset)
-            elif name.endswith(".exe") or "win" in name:
-                win_files.append(asset)
-            elif name.endswith(".zip"):
-                # It's a zip file with no obvious OS indicators. Assume it's Windows fallback.
-                win_files.append(asset)
-                
-        target_list = win_files if is_windows else mac_files
-        
-        if target_list:
-            # If on Windows, prioritize the .exe if it exists, otherwise return the zip
-            if is_windows:
-                for a in target_list:
-                    if a["name"].lower().endswith(".exe"):
-                        return a
-            return target_list[0]
-            
-        return assets[0] if assets else None
+        return pick_app_asset(release_data.get("assets", []))
 
     def start_installation(self):
         index = self.version_combo.currentIndex()

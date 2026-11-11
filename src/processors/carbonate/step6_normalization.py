@@ -1,5 +1,5 @@
 import openpyxl
-from openpyxl.styles import PatternFill, Border, Side, Font, Alignment
+from openpyxl.styles import PatternFill, Border, Side, Font, Alignment, Color
 from openpyxl.cell.rich_text import CellRichText, TextBlock
 from openpyxl.cell.text import InlineFont
 from openpyxl.utils import get_column_letter
@@ -9,6 +9,7 @@ import re
 import unicodedata
 import statistics
 import utils.settings as settings
+from utils.colors import material_color_hex
 from utils.common_utils import embed_settings_popup, save_workbook_atomic
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.worksheet.formula import ArrayFormula
@@ -53,21 +54,31 @@ def get_subscript_label(main_text, sub_text, base_font=None):
     ])
 
 def get_co2_temp_label():
-    """Retrieves dynamic temperature text from settings for CO2 normalization."""
+    """Retrieves the dynamic temperature tag shown beside the CO2 δ¹⁸O header."""
     # Use the exact string saved by the UI
     mode = settings.get_setting("CO2_TEMP_MODE")
     
     if mode == "72 °C":
-        return "Using 72 °C"
+        return "@ 72 °C"
     elif mode == "25 °C":
-        return "Using 25 °C"
+        return "@ 25 °C"
     elif mode == "Custom":
         # Whatever the user typed in the Advanced Settings CO2 box, e.g. "70 °C"
         custom = str(settings.get_setting("CO2_CUSTOM_LABEL") or "").strip()
-        return f"Using {custom}" if custom else "Using Custom Temp"
+        return f"@ {custom}" if custom else "@ ____"
         
     # Absolute fallback just in case settings fail to load completely
-    return "Using 25 °C"
+    return "@ 25 °C"
+
+def write_co2_temp_tag(ws, offset_col):
+    """Yellow "@ 25 °C" tag in the cell right of the published δ¹⁸O(CO2) header.
+
+    Called again after the blanket box shading so the highlight survives it.
+    """
+    cell = ws.cell(row=3, column=8 + offset_col, value=get_co2_temp_label())
+    cell.font = Font(color="000000", bold=True)
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    cell.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 
 def extract_sample_base(identifier):
     if not identifier or not isinstance(identifier, str):
@@ -76,22 +87,31 @@ def extract_sample_base(identifier):
     base = re.sub(r"\s*r\d+(\.\d+)?$", "", identifier, flags=re.IGNORECASE)
     return base.strip()
 
+def _yield_match_key(name):
+    """Compact form of a material or sample name for Yield matching.
+
+    Case, spaces, dashes, underscores and a "STD" tag are ignored, so
+    "NBS 18", "nbs-18" and "NBS18 std" all compare equal.
+    """
+    return re.sub(r'[\s\-_]+', '', str(name or "").upper()).replace("STD", "")
+
+def _yield_name_matches(mat, sample_base):
+    """True when a sample base name is the Yield reference material `mat`.
+
+    Exact comparison of the compact forms. Substring matching is wrong here:
+    a sample called "A" sits inside "CARRARA" and "B" inside "NBS18", which
+    pulled whole sample sets into the reference slopes.
+    """
+    mat_key = _yield_match_key(mat)
+    return bool(mat_key) and mat_key == _yield_match_key(sample_base)
+
 def _yield_material_present(mat, present_bases):
     """True when a Yield reference material actually shows up in the run.
 
     Mirrors the name matching used by the Yield slope/intercept loop so a
     group is drawn only when its slope can really be built from the data.
     """
-    mat_clean = re.sub(r'[\s\-_]+', '', str(mat).upper()).replace("STD", "")
-    if not mat_clean:
-        return False
-    for key in present_bases:
-        if not key:
-            continue
-        key_up = key.upper()
-        if mat_clean in key_up or key_up in mat_clean:
-            return True
-    return False
+    return any(_yield_name_matches(mat, key) for key in present_bases)
 
 def filter_yield_groups_by_presence(yield_groups, present_bases):
     """Drop Yield groups whose reference materials were not measured.
@@ -105,15 +125,79 @@ def filter_yield_groups_by_presence(yield_groups, present_bases):
     return [g for g in yield_groups
             if g and all(_yield_material_present(m, present_bases) for m in g)]
 
+# Sort key for an identifier with no rN suffix: last, and recognisably "none".
+UNNUMBERED_RUN = 9999
+
 def extract_run_number(identifier):
     if not identifier or not isinstance(identifier, str):
-        return (9999, 0)
+        return (UNNUMBERED_RUN, 0)
     m = re.search(r"r(\d+)(?:\.(\d+))?", identifier, flags=re.IGNORECASE)
     if m:
         major = int(m.group(1))
         minor = int(m.group(2)) if m.group(2) else 0
         return (major, minor)
-    return (9999, 0)
+    return (UNNUMBERED_RUN, 0)
+
+# --- Splitting a re-measured sample into sessions -------------------------
+# Runs are gathered by base name ("Rhodo 74 r2" -> "Rhodo 74"). That is right
+# when one sample's runs are spread out and keep counting (r1, r2 ... r3), but
+# wrong for a time series that re-measures the same name: "A r1-r3" on DAY 12,
+# again on DAY 9, and so on. Each of those is its own sample.
+#
+# Rule: take one name's runs in measurement order (Time Code) and start a new
+# session whenever the run number fails to go up. r1 r2 r3 r1 r2 r3 is two
+# sessions; r1 r2 ... r3 is one. Runs with no rN never open a session.
+# Identifier 2 cannot do this: it is only the position in the sequence.
+# Only samples are split; every run of a standard belongs in its slope.
+# step5_group.py imports this too, so Group and Normalization always agree.
+
+_SESSION_RUN_RE = re.compile(r"[rR](\d+)(?:\.(\d+))?\s*[a-zA-Z]*\s*$")
+_TIME_CODE_FORMATS = ("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M")
+
+def _session_run_number(identifier):
+    """'A r2' -> (2, 0), 'HeCO2 r1.3' -> (1, 3), 'HeCO2' -> None."""
+    if identifier is None:
+        return None
+    m = _SESSION_RUN_RE.search(str(identifier).strip())
+    return (int(m.group(1)), int(m.group(2) or 0)) if m else None
+
+def _parse_time_code(value):
+    if isinstance(value, datetime):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip()
+    for fmt in _TIME_CODE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+def split_into_sessions(items, ident_of, time_of):
+    """Split one base name's runs into sessions, earliest first.
+
+    `items` is in sheet order; `ident_of` / `time_of` read Identifier 1 and
+    the Time Code from an item. Runs are ordered by Time Code when every run
+    has one (some files list the sequence newest first), else by sheet order.
+    """
+    items = list(items)
+    times = [_parse_time_code(time_of(it)) for it in items]
+    if items and all(t is not None for t in times):
+        order = sorted(range(len(items)), key=lambda i: (times[i], i))
+    else:
+        order = list(range(len(items)))
+
+    sessions = [[]]
+    prev = None
+    for i in order:
+        run = _session_run_number(ident_of(items[i]))
+        if run is not None:
+            if prev is not None and run <= prev and sessions[-1]:
+                sessions.append([])
+            prev = run
+        sessions[-1].append(items[i])
+    return [s for s in sessions if s]
 
 def _make_fill(hex_color):
     c = hex_color.replace("#", "").upper()
@@ -138,9 +222,27 @@ def get_excel_range(col_let, rows):
     cells = ",".join(f"{col_let}{r}" for r in rows)
     return f"CHOOSE({indices},{cells})"
 
+# Column M of the grouped layout carries step 1's peak-count flag, e.g.
+# "> 11: 18" or "< 11: 5": the run had more or fewer than the expected 11
+# peaks, which makes it unreliable.
+CO2_PEAK_FLAG_COL = 13
+PEAK_FLAG_RE = re.compile(r"^[<>]\s*\d+\s*:\s*\d+$")
+
+def has_peak_count_flag(value):
+    """True for a red "> 11: 18" / "< 11: 5" peak-count flag."""
+    if value is None:
+        return False
+    return bool(PEAK_FLAG_RE.match(str(value).strip()))
+
 def _get_valid_co2_rows(rows, col_identifier1):
-    valid_indices = []
+    """Picks the CO2/HeCO2 runs worth keeping.
+
+    Numbered runs still collapse to one row per rN (lowest sub-run, r1 skipped),
+    but runs written without any rN are each their own run: collapsing them
+    would silently keep the first and drop every later one.
+    """
     seen = {}
+    unnumbered = []
     for i, r in enumerate(rows):
         ident_raw = str(r[col_identifier1 - 1] or "").strip()
         ident_lower = ident_raw.lower()
@@ -153,6 +255,9 @@ def _get_valid_co2_rows(rows, col_identifier1):
         major, minor = extract_run_number(ident_clean)
         if major is None or minor is None:
             continue
+        if major == UNNUMBERED_RUN:
+            unnumbered.append(i)
+            continue
         if major == 1:
             continue
         if major not in seen:
@@ -161,7 +266,220 @@ def _get_valid_co2_rows(rows, col_identifier1):
             prev_minor, prev_i = seen[major]
             if minor < prev_minor:
                 seen[major] = (minor, i)
-    return sorted(idx for _, idx in seen.values())
+    
+    chosen = sorted([idx for _, idx in seen.values()] + unnumbered)
+    
+    # The flag is read only once a run has its representative: a bad r2.1 means
+    # run 2 is bad, not that r2.2 should stand in for it.
+    return [i for i in chosen
+            if not has_peak_count_flag(rows[i][CO2_PEAK_FLAG_COL - 1]
+                                       if len(rows[i]) >= CO2_PEAK_FLAG_COL else None)]
+
+# --- Normalized output geometry -------------------------------------------
+# Each slope group owns a 4-column block: the value column (which doubles as
+# Average on the summary rows), Stdev, Count, and a blank spacer so adjacent
+# groups stay visually separate. The last group in a section drops the spacer.
+OUT_GROUP_STRIDE = 4
+OUT_GROUP_WIDTH = 3
+
+# Aragonite only earns its columns when the run actually contains n.arag
+# samples. The whole sheet's geometry depends on it, so every caller reads the
+# same module-level answer, set once per run by step6_normalization_carbonate.
+OUT_INCLUDE_ARAG = True
+
+def out_col(section_start, group_index):
+    """First (value / Average) column of a slope group inside a section."""
+    return section_start + group_index * OUT_GROUP_STRIDE
+
+def get_output_layout(num_groups, output_offset=0, include_arag=None):
+    """Column geometry of one Normalized VPDB + VSMOW block."""
+    if include_arag is None:
+        include_arag = OUT_INCLUDE_ARAG
+    span = max(0, num_groups * OUT_GROUP_STRIDE - 1)
+    c_start = 19 + output_offset
+    o_calc_start = c_start + span + 1
+    o_arag_start = o_calc_start + span + 1 if include_arag else None
+    box1_end = (o_arag_start if include_arag else o_calc_start) + span - 1
+    box2_start = box1_end + 2
+    vsmow_calc_start = box2_start
+    vsmow_arag_start = vsmow_calc_start + span + 1 if include_arag else None
+    box2_end = (vsmow_arag_start if include_arag else vsmow_calc_start) + span - 1
+    return {
+        "span": span,
+        "include_arag": include_arag,
+        "c_start": c_start,
+        "o_calc_start": o_calc_start,
+        "o_arag_start": o_arag_start,
+        "vsmow_calc_start": vsmow_calc_start,
+        "vsmow_arag_start": vsmow_arag_start,
+        "box1_start": c_start,
+        "box1_end": box1_end,
+        "box2_start": box2_start,
+        "box2_end": box2_end,
+    }
+
+def out_section_starts(layout, is_arag, do_c=True, do_o=True):
+    """The (C, O, VSMOW) section starts a summary row should touch."""
+    starts = []
+    if do_c:
+        starts.append(layout["c_start"])
+    if do_o:
+        arag = is_arag and layout["include_arag"]
+        starts.append(layout["o_arag_start"] if arag else layout["o_calc_start"])
+        starts.append(layout["vsmow_arag_start"] if arag else layout["vsmow_calc_start"])
+    return starts
+
+# --- Sheet-wide block layout ----------------------------------------------
+# Carbonate, Yield and CO2 are laid out left to right in whatever order the
+# user arranged them, and any of them can be switched off. Only the widths and
+# the order decide where each one lands, so nothing is pinned to a column.
+BLOCK_GAP = 3            # blank columns between two blocks
+BLUE_BOX_SPAN = 14       # a reference-material box covers 14 columns
+FIRST_OUT_COL = 19       # where the left-most block's output starts
+DATA_BLOCKS = ("Carbonate", "CO2")
+DEFAULT_BLOCK_ORDER = ("Carbonate", "Yield", "CO2")
+
+def yield_block_end(start_col, num_yield_groups):
+    """Right-most column the Yield block uses, table or per-sample columns."""
+    return max(start_col + 12, start_col + 1 + num_yield_groups * 4)
+
+def plan_block_layout(order, group_counts, num_yield_groups):
+    """Places each enabled block and returns where it goes.
+
+    `order` is the enabled blocks, left to right; `group_counts` maps a data
+    block to its slope-group count. A data block gets `out_shift` (its output
+    columns) and `top_shift` (its reference box). The left-most block keeps its
+    box in the top-left corner, above the copied data, which is where it has
+    always been; any block further right carries its box over its own columns.
+    """
+    plan = {}
+    cursor = FIRST_OUT_COL
+    first = True
+    for name in order:
+        if name in DATA_BLOCKS:
+            out_shift = cursor - FIRST_OUT_COL
+            # A trailing box sits one column right of its own output start:
+            # column 3 + top_shift == 19 + out_shift + 1.
+            top_shift = 0 if first else out_shift + 17
+            end = get_output_layout(group_counts.get(name, 0), out_shift)["box2_end"]
+            if not first:
+                end = max(end, 3 + top_shift + BLUE_BOX_SPAN - 1)
+            plan[name] = {"out_shift": out_shift, "top_shift": top_shift,
+                          "start": cursor, "end": end}
+        else:
+            end = yield_block_end(cursor, num_yield_groups)
+            plan[name] = {"start_col": cursor, "start": cursor, "end": end}
+        cursor = end + 1 + BLOCK_GAP
+        first = False
+    return plan
+
+def resolve_block_order(order, enabled):
+    """Enabled blocks, left to right, with Yield never left-most.
+
+    Yield has no reference box of its own to put in the top-left corner and
+    the report reads the output area from column 19, so the first slot belongs
+    to a data block.
+    """
+    seen = []
+    for name in list(order or ()) + list(DEFAULT_BLOCK_ORDER):
+        if name in DEFAULT_BLOCK_ORDER and name not in seen:
+            seen.append(name)
+    live = [name for name in seen if enabled.get(name)]
+    if live and live[0] not in DATA_BLOCKS:
+        for i, name in enumerate(live):
+            if name in DATA_BLOCKS:
+                live.insert(0, live.pop(i))
+                break
+    return live
+
+def _cell_list(col_let, rows):
+    """Explicit cell list (A1,A3,A7) so plain AVERAGE/STDEV/COUNT can take it."""
+    return ",".join(f"{col_let}{r}" for r in sorted(set(rows)))
+
+def write_summary_output_labels(ws, r, num_groups, is_arag, output_offset, font,
+                                do_c=True, do_o=True, outlier_marker=False):
+    """Average/Stdev/Count captions over the normalized slope-group blocks.
+
+    With outlier_marker, every block also gets its own "Outlier Excl." tag in
+    the spacer to its left, so the row stays readable however far right you
+    scroll instead of relying on one marker at the far edge.
+    """
+    if num_groups <= 0:
+        return
+    layout = get_output_layout(num_groups, output_offset)
+    for start in out_section_starts(layout, is_arag, do_c, do_o):
+        for i in range(num_groups):
+            base = out_col(start, i)
+            for k, txt in enumerate(("Average", "Stdev", "Count")):
+                cell = ws.cell(row=r, column=base + k, value=txt)
+                cell.font = font
+                cell.alignment = Alignment(horizontal="right")
+            if outlier_marker:
+                marker = ws.cell(row=r, column=base - 1, value="Outlier Excl.")
+                marker.font = Font(bold=True)
+                marker.alignment = Alignment(horizontal="right")
+
+def strike_output_cells(ws, r, num_groups, is_arag, output_offset, do_c, do_o, color="00FF0000"):
+    """Strikes a run's normalized cells wherever its raw value was excluded.
+
+    Normalization is linear (slope*x + intercept, and VSMOW likewise), so it
+    leaves every run's distance from the mean in standard deviations untouched:
+    re-running the sigma test on the normalized column flags exactly the rows
+    the raw column already flagged. color=None keeps each cell's own colour
+    (used for peak-count-flagged runs).
+    """
+    if num_groups <= 0 or not (do_c or do_o):
+        return
+    layout = get_output_layout(num_groups, output_offset)
+    for start in out_section_starts(layout, is_arag, do_c, do_o):
+        for i in range(num_groups):
+            cell = ws.cell(row=r, column=out_col(start, i))
+            struck = copy(cell.font)
+            struck.strike = True
+            if color:
+                struck.color = Color(rgb=color)
+            cell.font = struck
+
+def strike_flagged_cells(ws, r, columns):
+    """Strikes a peak-count-flagged run's value cells, keeping their colour."""
+    for col in columns:
+        cell = ws.cell(row=r, column=col)
+        struck = copy(cell.font)
+        struck.strike = True
+        cell.font = struck
+
+def write_summary_output_cells(ws, r, num_groups, is_arag, rows_c, rows_o,
+                               output_format, output_offset, font):
+    """Stats over the per-run normalized values above, not a renormalized average.
+
+    Normalizing an average would only re-apply the slope/intercept to a number
+    that is already an average, which says nothing about the spread; averaging
+    the normalized runs themselves gives a real Stdev and Count. Passing None
+    for rows_c or rows_o leaves that section untouched.
+    """
+    if num_groups <= 0:
+        return
+    layout = get_output_layout(num_groups, output_offset)
+    c_start, o_start, vsmow_start = out_section_starts(layout, is_arag)
+    for start, rows in ((c_start, rows_c), (o_start, rows_o), (vsmow_start, rows_o)):
+        if not rows:
+            continue
+        for i in range(num_groups):
+            base = out_col(start, i)
+            rng = _cell_list(get_column_letter(base), rows)
+            if not rng:
+                continue
+            avg = ws.cell(row=r, column=base, value=f'=IFERROR(AVERAGE({rng}),"")')
+            avg.number_format = output_format
+            sd = ws.cell(row=r, column=base + 1, value=f'=IFERROR(STDEV({rng}),"")')
+            sd.number_format = output_format
+            # A slope group with no usable slope leaves the column blank; show
+            # nothing there rather than a lone 0.
+            cnt = ws.cell(row=r, column=base + 2,
+                          value=f'=IF(COUNT({rng})=0,"",COUNT({rng}))')
+            cnt.number_format = '0'
+            for c in (base, base + 1, base + 2):
+                ws.cell(row=r, column=c).font = font
 
 def get_summary_num_format(base_name):
     return '0.000'
@@ -195,20 +513,14 @@ def draw_blue_box_structure(ws, offset_col=0, setting_key="Carbonate", box_fill=
     center = Alignment(horizontal="center", vertical="center")
     
     def get_style_font(color_name, is_bold):
-        colors = {"black": "000000", "green": "008000", "red": "FF0000", 
-                  "darkblue": "000080", "lightblue": "3399FF", "orange": "FF9900"}
-        hex_code = colors.get(str(color_name).lower(), "000000")
-        return Font(color=hex_code, bold=is_bold)
+        return Font(color=material_color_hex(color_name), bold=is_bold)
 
     today_str = datetime.today().strftime("%Y-%m-%d")
     
     if offset_col == 0:
         ws.cell(row=1, column=1, value=today_str).alignment = Alignment(horizontal="left", vertical="center")
-        header_title = f"Normalization ({setting_key})"
-    else:
-        temp_note = get_co2_temp_label()
-        header_title = f"Normalization ({setting_key}) - {temp_note}"
-        
+
+    header_title = f"Normalization ({setting_key})"
     ws.cell(row=1, column=3 + offset_col, value=header_title).font = black_bold
     ws.cell(row=1, column=3 + offset_col).alignment = center
     
@@ -237,6 +549,11 @@ def draw_blue_box_structure(ws, offset_col=0, setting_key="Carbonate", box_fill=
             cell.fill = box_fill
             cell.border = Border(top=medium if r==2 else None, bottom=medium if r==3 else None, 
                                  left=medium if c==col_start else None, right=medium if c==col_end else None)
+
+    # CO2 runs are temperature dependent, so tag the published δ¹⁸O column with the
+    # acid/equilibration temperature instead of burying it in the box title.
+    if setting_key != "Carbonate":
+        write_co2_temp_tag(ws, offset_col)
 
     active_slope_materials = []
     for group in slope_groups:
@@ -378,10 +695,7 @@ def populate_blue_box_math(ws, slope_info, mat_row_map, offset_col=0, setting_ke
     if not materials: materials = []
 
     def get_style_font(color_name, is_bold):
-        colors = {"black": "000000", "green": "008000", "red": "FF0000", 
-                  "darkblue": "000080", "lightblue": "3399FF", "orange": "FF9900"}
-        hex_code = colors.get(str(color_name).lower(), "000000")
-        return Font(color=hex_code, bold=is_bold)
+        return Font(color=material_color_hex(color_name), bold=is_bold)
     
     identifier_col = 3
     c_avg_col_ref = 11 
@@ -474,8 +788,12 @@ def populate_blue_box_math(ws, slope_info, mat_row_map, offset_col=0, setting_ke
                 cell.value = formula
                 cell.number_format = FMT_3_DEC
 
+def yield_table_bottom_row(num_yield_groups):
+    """Last row the top Yield table occupies."""
+    return 19 + (num_yield_groups * 3)
+
 def draw_yield_table(ws, start_col, box_fill, num_yield_groups):
-    max_yield_row = 19 + (num_yield_groups * 3)
+    max_yield_row = yield_table_bottom_row(num_yield_groups)
     for r in range(1, max_yield_row + 1):
         for c in range(start_col, start_col + 13):
             ws.cell(row=r, column=c).fill = box_fill
@@ -603,17 +921,20 @@ def draw_upper_boxes(ws, h_row, box_fill, black_bold, green_bold, output_offset=
     if num_groups == 0:
         return
     
-    c_start = 19 + output_offset
-    o_calc_start = c_start + num_groups + 1 
-    o_arag_start = o_calc_start + num_groups + 1
+    layout = get_output_layout(num_groups, output_offset)
+    c_start = layout["c_start"]
+    o_calc_start = layout["o_calc_start"]
+    o_arag_start = layout["o_arag_start"]
+    span = layout["span"]
     
-    box1_start = c_start
-    box1_end = o_arag_start + num_groups - 1
+    box1_start = layout["box1_start"]
+    box1_end = layout["box1_end"]
     
-    box2_start = box1_end + 2
-    vsmow_calc_start = box2_start
-    vsmow_arag_start = vsmow_calc_start + num_groups + 1 
-    box2_end = vsmow_arag_start + num_groups - 1
+    box2_start = layout["box2_start"]
+    vsmow_calc_start = layout["vsmow_calc_start"]
+    vsmow_arag_start = layout["vsmow_arag_start"]
+    box2_end = layout["box2_end"]
+    include_arag = layout["include_arag"]
 
     thick = Side(style="thick")
     
@@ -648,26 +969,28 @@ def draw_upper_boxes(ws, h_row, box_fill, black_bold, green_bold, output_offset=
     ws.cell(h_row - 3, box1_start, f"Normalized VPDB ({setting_key})").font = black_bold
 
     if num_groups > 1:
-        ws.merge_cells(start_row=h_row - 2, start_column=o_calc_start, end_row=h_row - 2, end_column=o_calc_start + num_groups - 1)
-        ws.merge_cells(start_row=h_row - 2, start_column=o_arag_start, end_row=h_row - 2, end_column=box1_end)
+        ws.merge_cells(start_row=h_row - 2, start_column=o_calc_start, end_row=h_row - 2, end_column=o_calc_start + span - 1)
+        if include_arag:
+            ws.merge_cells(start_row=h_row - 2, start_column=o_arag_start, end_row=h_row - 2, end_column=box1_end)
         
     ws.cell(h_row - 2, o_calc_start, "Calcite").font = black_bold
-    ws.cell(h_row - 2, o_arag_start, "Aragonite").font = green_bold
+    if include_arag:
+        ws.cell(h_row - 2, o_arag_start, "Aragonite").font = green_bold
+
+    o_label = "Carbonate" if setting_key == "Carbonate" else "CO2"
 
     for i, grp in enumerate(slope_groups):
         rt = get_rich_text_for_group(grp)
-        if setting_key == "Carbonate":
-            ws.cell(h_row - 1, c_start + i, "δ¹³C")
-            ws.cell(h_row - 1, o_calc_start + i).value = get_subscript_label("δ¹⁸O", "Carbonate")
-            ws.cell(h_row - 1, o_arag_start + i).value = get_subscript_label("δ¹⁸O", "Carbonate")
-        else:
-            ws.cell(h_row - 1, c_start + i, "δ¹³C")
-            ws.cell(h_row - 1, o_calc_start + i).value = get_subscript_label("δ¹⁸O", "CO2")
-            ws.cell(h_row - 1, o_arag_start + i).value = get_subscript_label("δ¹⁸O", "CO2")
-
-        ws.cell(h_row, c_start + i).value = rt
-        ws.cell(h_row, o_calc_start + i).value = rt
-        ws.cell(h_row, o_arag_start + i).value = rt
+        header_sections = [(c_start, "C"), (o_calc_start, "O")]
+        if include_arag:
+            header_sections.append((o_arag_start, "O"))
+        for start, label in header_sections:
+            base = out_col(start, i)
+            if label == "C":
+                ws.cell(h_row - 1, base, "δ¹³C")
+            else:
+                ws.cell(h_row - 1, base).value = get_subscript_label("δ¹⁸O", o_label)
+            ws.cell(h_row, base).value = rt
 
     for r in range(h_row - 3, h_row + 1):
         for c in range(box2_start, box2_end + 1):
@@ -684,23 +1007,20 @@ def draw_upper_boxes(ws, h_row, box_fill, black_bold, green_bold, output_offset=
     ws.cell(h_row - 3, box2_start, "VSMOW").font = black_bold
 
     if num_groups > 1:
-        ws.merge_cells(start_row=h_row - 2, start_column=vsmow_calc_start, end_row=h_row - 2, end_column=vsmow_calc_start + num_groups - 1)
-        ws.merge_cells(start_row=h_row - 2, start_column=vsmow_arag_start, end_row=h_row - 2, end_column=box2_end)
+        ws.merge_cells(start_row=h_row - 2, start_column=vsmow_calc_start, end_row=h_row - 2, end_column=vsmow_calc_start + span - 1)
+        if include_arag:
+            ws.merge_cells(start_row=h_row - 2, start_column=vsmow_arag_start, end_row=h_row - 2, end_column=box2_end)
         
     ws.cell(h_row - 2, vsmow_calc_start, "Calcite").font = black_bold
-    ws.cell(h_row - 2, vsmow_arag_start, "Aragonite").font = green_bold
+    if include_arag:
+        ws.cell(h_row - 2, vsmow_arag_start, "Aragonite").font = green_bold
     
     for i, grp in enumerate(slope_groups):
         rt = get_rich_text_for_group(grp)
-        if setting_key == "Carbonate":
-            ws.cell(h_row - 1, vsmow_calc_start + i).value = get_subscript_label("δ¹⁸O", "Carbonate")
-            ws.cell(h_row - 1, vsmow_arag_start + i).value = get_subscript_label("δ¹⁸O", "Carbonate")
-        else:
-            ws.cell(h_row - 1, vsmow_calc_start + i).value = get_subscript_label("δ¹⁸O", "CO2")
-            ws.cell(h_row - 1, vsmow_arag_start + i).value = get_subscript_label("δ¹⁸O", "CO2")
-
-        ws.cell(h_row, vsmow_calc_start + i).value = rt
-        ws.cell(h_row, vsmow_arag_start + i).value = rt
+        for start in ((vsmow_calc_start, vsmow_arag_start) if include_arag else (vsmow_calc_start,)):
+            base = out_col(start, i)
+            ws.cell(h_row - 1, base).value = get_subscript_label("δ¹⁸O", o_label)
+            ws.cell(h_row, base).value = rt
 
 def draw_lower_boxes(ws, divider_top_row, box_fill, black_bold, green_bold, output_offset=0, setting_key="Carbonate"):
     slope_groups = settings.get_setting("SLOPE_INTERCEPT_GROUPS", sub_key=setting_key) or []
@@ -708,17 +1028,20 @@ def draw_lower_boxes(ws, divider_top_row, box_fill, black_bold, green_bold, outp
     if num_groups == 0:
         return
     
-    c_start = 19 + output_offset
-    o_calc_start = c_start + num_groups + 1 
-    o_arag_start = o_calc_start + num_groups + 1
+    layout = get_output_layout(num_groups, output_offset)
+    c_start = layout["c_start"]
+    o_calc_start = layout["o_calc_start"]
+    o_arag_start = layout["o_arag_start"]
+    span = layout["span"]
     
-    box1_start = c_start
-    box1_end = o_arag_start + num_groups - 1
+    box1_start = layout["box1_start"]
+    box1_end = layout["box1_end"]
     
-    box2_start = box1_end + 2
-    vsmow_calc_start = box2_start
-    vsmow_arag_start = vsmow_calc_start + num_groups + 1 
-    box2_end = vsmow_arag_start + num_groups - 1
+    box2_start = layout["box2_start"]
+    vsmow_calc_start = layout["vsmow_calc_start"]
+    vsmow_arag_start = layout["vsmow_arag_start"]
+    box2_end = layout["box2_end"]
+    include_arag = layout["include_arag"]
 
     thick = Side(style="thick")
     
@@ -738,11 +1061,13 @@ def draw_lower_boxes(ws, divider_top_row, box_fill, black_bold, green_bold, outp
     ws.cell(divider_top_row - 2, box1_start, "VPDB").font = black_bold
     
     if num_groups > 1:
-        ws.merge_cells(start_row=divider_top_row - 1, start_column=o_calc_start, end_row=divider_top_row - 1, end_column=o_calc_start + num_groups - 1)
-        ws.merge_cells(start_row=divider_top_row - 1, start_column=o_arag_start, end_row=divider_top_row - 1, end_column=box1_end)
+        ws.merge_cells(start_row=divider_top_row - 1, start_column=o_calc_start, end_row=divider_top_row - 1, end_column=o_calc_start + span - 1)
+        if include_arag:
+            ws.merge_cells(start_row=divider_top_row - 1, start_column=o_arag_start, end_row=divider_top_row - 1, end_column=box1_end)
         
     ws.cell(divider_top_row - 1, o_calc_start, "Calcite").font = black_bold
-    ws.cell(divider_top_row - 1, o_arag_start, "Aragonite").font = green_bold
+    if include_arag:
+        ws.cell(divider_top_row - 1, o_arag_start, "Aragonite").font = green_bold
     
     red_font = InlineFont(color='00FF0000', b=True)
     blue_font = InlineFont(color='000000FF', b=True)
@@ -759,21 +1084,21 @@ def draw_lower_boxes(ws, divider_top_row, box_fill, black_bold, green_bold, outp
             elif "603" in clean: font = green_font
             parts.append((font, clean.replace("NBS","").replace("IAEA","").strip() + " "))
         return create_rich_text(parts)
+
+    o_label = "Carbonate" if setting_key == "Carbonate" else "CO2"
         
     for i, grp in enumerate(slope_groups):
         rt = get_rich_text_for_group(grp)
-        if setting_key == "Carbonate":
-            ws.cell(divider_top_row, c_start + i, "δ¹³C")
-            ws.cell(divider_top_row, o_calc_start + i).value = get_subscript_label("δ¹⁸O", "Carbonate")
-            ws.cell(divider_top_row, o_arag_start + i).value = get_subscript_label("δ¹⁸O", "Carbonate")
-        else:
-            ws.cell(divider_top_row, c_start + i, "δ¹³C")
-            ws.cell(divider_top_row, o_calc_start + i).value = get_subscript_label("δ¹⁸O", "CO2")
-            ws.cell(divider_top_row, o_arag_start + i).value = get_subscript_label("δ¹⁸O", "CO2")
-
-        ws.cell(divider_top_row + 1, c_start + i).value = rt
-        ws.cell(divider_top_row + 1, o_calc_start + i).value = rt
-        ws.cell(divider_top_row + 1, o_arag_start + i).value = rt
+        header_sections = [(c_start, "C"), (o_calc_start, "O")]
+        if include_arag:
+            header_sections.append((o_arag_start, "O"))
+        for start, label in header_sections:
+            base = out_col(start, i)
+            if label == "C":
+                ws.cell(divider_top_row, base, "δ¹³C")
+            else:
+                ws.cell(divider_top_row, base).value = get_subscript_label("δ¹⁸O", o_label)
+            ws.cell(divider_top_row + 1, base).value = rt
 
     for r in range(divider_top_row - 2, divider_top_row + 2):
         for c in range(box2_start, box2_end + 1):
@@ -790,23 +1115,20 @@ def draw_lower_boxes(ws, divider_top_row, box_fill, black_bold, green_bold, outp
     ws.cell(divider_top_row - 2, box2_start, "VSMOW").font = black_bold
     
     if num_groups > 1:
-        ws.merge_cells(start_row=divider_top_row - 1, start_column=vsmow_calc_start, end_row=divider_top_row - 1, end_column=vsmow_calc_start + num_groups - 1)
-        ws.merge_cells(start_row=divider_top_row - 1, start_column=vsmow_arag_start, end_row=divider_top_row - 1, end_column=box2_end)
+        ws.merge_cells(start_row=divider_top_row - 1, start_column=vsmow_calc_start, end_row=divider_top_row - 1, end_column=vsmow_calc_start + span - 1)
+        if include_arag:
+            ws.merge_cells(start_row=divider_top_row - 1, start_column=vsmow_arag_start, end_row=divider_top_row - 1, end_column=box2_end)
         
     ws.cell(divider_top_row - 1, vsmow_calc_start, "Calcite").font = black_bold
-    ws.cell(divider_top_row - 1, vsmow_arag_start, "Aragonite").font = green_bold
+    if include_arag:
+        ws.cell(divider_top_row - 1, vsmow_arag_start, "Aragonite").font = green_bold
     
     for i, grp in enumerate(slope_groups):
         rt = get_rich_text_for_group(grp)
-        if setting_key == "Carbonate":
-            ws.cell(divider_top_row, vsmow_calc_start + i).value = get_subscript_label("δ¹⁸O", "Carbonate")
-            ws.cell(divider_top_row, vsmow_arag_start + i).value = get_subscript_label("δ¹⁸O", "Carbonate")
-        else:
-            ws.cell(divider_top_row, vsmow_calc_start + i).value = get_subscript_label("δ¹⁸O", "CO2")
-            ws.cell(divider_top_row, vsmow_arag_start + i).value = get_subscript_label("δ¹⁸O", "CO2")
-
-        ws.cell(divider_top_row + 1, vsmow_calc_start + i).value = rt
-        ws.cell(divider_top_row + 1, vsmow_arag_start + i).value = rt
+        for start in ((vsmow_calc_start, vsmow_arag_start) if include_arag else (vsmow_calc_start,)):
+            base = out_col(start, i)
+            ws.cell(divider_top_row, base).value = get_subscript_label("δ¹⁸O", o_label)
+            ws.cell(divider_top_row + 1, base).value = rt
 
 def _detect_decimal_places_from_format(fmt: str):
     if not fmt or not isinstance(fmt, str):
@@ -827,11 +1149,6 @@ def _detect_decimal_places_from_format(fmt: str):
 # --- Main Function ---
 def step6_normalization_carbonate(file_path):
     
-    carb_slope_groups = settings.get_setting("SLOPE_INTERCEPT_GROUPS", sub_key="Carbonate") or []
-    num_slope_groups = len(carb_slope_groups)
-    
-    EXTRA_HORIZ_SHIFT = max(0, num_slope_groups - 2) * 5
-    
     yield_slope_groups = settings.get_setting("SLOPE_INTERCEPT_GROUPS", sub_key="Yield") or []
     num_yield_groups = len(yield_slope_groups)
     
@@ -843,20 +1160,25 @@ def step6_normalization_carbonate(file_path):
     
     calc_co2 = settings.get_setting("CALC_CO2")
     if calc_co2 is None: calc_co2 = True      # Default fallback
-
-    # --- GLOBAL SHIFT VARIABLES ---
-    YIELD_START_COL = 36 + EXTRA_HORIZ_SHIFT
     
-    if calc_yield:
-        CO2_TOP_SHIFT = 57 + EXTRA_HORIZ_SHIFT   
-        CO2_OUT_SHIFT = 40 + EXTRA_HORIZ_SHIFT   
-    else:
-        # Shifts CO2 left to seamlessly occupy the empty Yield space
-        CO2_TOP_SHIFT = 34 + EXTRA_HORIZ_SHIFT   
-        CO2_OUT_SHIFT = 17 + EXTRA_HORIZ_SHIFT   
-        
+    calc_carbonate = settings.get_setting("CALC_CARBONATE")
+    if calc_carbonate is None: calc_carbonate = True
+    
+    # Which blocks to draw, left to right. Everything downstream reads this
+    # rather than assuming Carbonate is present or sits first.
+    block_enabled = {
+        "Carbonate": bool(calc_carbonate),
+        "Yield": bool(calc_yield),
+        "CO2": bool(calc_co2),
+    }
+    if not (block_enabled["Carbonate"] or block_enabled["CO2"]):
+        raise ValueError(
+            "Nothing to normalize: switch on the Carbonate or the CO2 table before running Step 6."
+        )
+    live_order = resolve_block_order(settings.get_setting("BLOCK_ORDER"), block_enabled)
+    calc_yield = "Yield" in live_order
+
     HEADER_ROW_SHIFT = 12 
-    # ------------------------------
 
     # --- Fetch Yield Compounds and Map to Excel Rows ---
     yield_compounds = settings.get_setting("YIELD_COMPOUNDS") or {"ref": "CaCO3", "samp": "MnCO3"}
@@ -904,14 +1226,38 @@ def step6_normalization_carbonate(file_path):
     # Yield groups are global defaults, so keep only the ones this run can
     # actually support. Layout metrics that depend on the count follow.
     present_yield_bases = set()
+    arag_re = re.compile(r"\bn\.?\s*arag\b", flags=re.IGNORECASE)
+    has_arag = False
     for row_cells in ws_last6.iter_rows(min_row=2, min_col=col_identifier1, max_col=col_identifier1):
-        base = _normalize_text(extract_sample_base(row_cells[0].value))
+        ident = row_cells[0].value
+        base = _normalize_text(extract_sample_base(ident))
         if base:
             present_yield_bases.add(base)
+        if ident and arag_re.search(str(ident)):
+            has_arag = True
 
     yield_slope_groups = filter_yield_groups_by_presence(yield_slope_groups, present_yield_bases)
     num_yield_groups = len(yield_slope_groups)
     EXTRA_VERT_SHIFT = max(0, num_yield_groups - 2) * 3
+
+    # No aragonite in the run means no Aragonite columns anywhere, which makes
+    # the output narrower, so the layout has to settle before anything is drawn.
+    global OUT_INCLUDE_ARAG
+    OUT_INCLUDE_ARAG = has_arag
+
+    # --- SHEET LAYOUT ---
+    # Each block is measured and placed in turn, so the order the user chose
+    # and the group counts alone decide the columns.
+    block_group_counts = {
+        name: len(settings.get_setting("SLOPE_INTERCEPT_GROUPS", sub_key=name) or [])
+        for name in DATA_BLOCKS
+    }
+    layout_plan = plan_block_layout(live_order, block_group_counts, num_yield_groups)
+    
+    YIELD_START_COL = (layout_plan["Yield"]["start_col"] if calc_yield
+                       else max(p["end"] for p in layout_plan.values()) + 1 + BLOCK_GAP)
+    LAST_LAYOUT_COL = max(p["end"] for p in layout_plan.values())
+    # ------------------------------
 
     if "Group_DNT" not in wb.sheetnames:
         raise ValueError("Sheet 'Group_DNT' not found. Run Step 5 first.")
@@ -936,25 +1282,39 @@ def step6_normalization_carbonate(file_path):
     gray_fill = _make_fill("E7E7E7")
     red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     
-    color_fonts = {
-        "nbs18": Font(color="FF0000"),
-        "nbs19": Font(color="000080"),
-        "iaea603": Font(color="008000"),
-        "lsvec": Font(color="3399FF"),
-    }
+    # Identifier colours for the run rows come from the reference tables, so a
+    # material added in the UI is coloured here too. Carbonate wins over CO2
+    # when both list the same name.
+    color_fonts = {}
+    for _key in ("CO2", "Carbonate"):
+        for _mat in settings.get_setting("REFERENCE_MATERIALS", sub_key=_key) or []:
+            _name = _normalize_text(_mat.get("col_c", ""))
+            if _name and str(_mat.get("color", "black")).lower() != "black":
+                color_fonts[_name] = Font(color=material_color_hex(_mat.get("color")))
     
     MAX_GROUP_COL = dest_col - 1
     
-    # DUAL TOP BLOCKS: Original Carbonate (Box Offset 0) & Conditional CO2 
-    carb_bottom, _, carb_slope_info, carb_mat_map = draw_blue_box_structure(ws_group, 0, "Carbonate", carb_fill)
+    # TOP BLOCKS: one reference box per enabled data block, in the user's order
+    block_fills = {"Carbonate": carb_fill, "CO2": co2_fill}
+    data_blocks = []
+    for name in live_order:
+        if name not in DATA_BLOCKS:
+            continue
+        placed = layout_plan[name]
+        fill = block_fills[name]
+        bottom, _, slope_info, mat_map = draw_blue_box_structure(
+            ws_group, placed["top_shift"], name, fill)
+        data_blocks.append({
+            "key": name,
+            "fill": fill,
+            "top_shift": placed["top_shift"],
+            "out_shift": placed["out_shift"],
+            "slope_info": slope_info,
+            "mat_map": mat_map,
+            "bottom": bottom,
+        })
     
-    if calc_co2:
-        co2_bottom, _, co2_slope_info, co2_mat_map = draw_blue_box_structure(ws_group, CO2_TOP_SHIFT, "CO2", co2_fill)
-        blue_box_bottom = max(carb_bottom, co2_bottom)
-    else:
-        co2_slope_info = []
-        co2_mat_map = {}
-        blue_box_bottom = carb_bottom
+    blue_box_bottom = max(b["bottom"] for b in data_blocks)
     
     # ---- INJECT YIELD CALCULATIONS TABLE INTO GAP DYNAMICALLY ----
     if calc_yield:
@@ -962,18 +1322,32 @@ def step6_normalization_carbonate(file_path):
     
     header_row = blue_box_bottom + 4 + HEADER_ROW_SHIFT + EXTRA_VERT_SHIFT
     
-    draw_upper_boxes(ws_group, header_row, carb_fill, Font(bold=True, color="000000"), Font(bold=True, color="008000"), 0, "Carbonate")
-    if calc_co2:
-        draw_upper_boxes(ws_group, header_row, co2_fill, Font(bold=True, color="000000"), Font(bold=True, color="008000"), CO2_OUT_SHIFT, "CO2")
+    # The Yield table's height comes from its own group count, which has
+    # nothing to do with the blue boxes'. Few slope groups and many Yield
+    # groups leaves the blue boxes ending well above the table, and the header
+    # row below them lands on top of it. Clear the table by the same one row
+    # the blue boxes get.
+    if calc_yield:
+        header_row = max(header_row, yield_table_bottom_row(num_yield_groups) + 5)
     
-    for row in ws_group.iter_rows(min_row=1, max_row=blue_box_bottom, min_col=1, max_col=MAX_GROUP_COL):
-        for cell in row:
-            cell.fill = carb_fill
-            
-    if calc_co2:
-        for row in ws_group.iter_rows(min_row=1, max_row=blue_box_bottom, min_col=1 + CO2_TOP_SHIFT, max_col=16 + CO2_TOP_SHIFT):
+    for block in data_blocks:
+        draw_upper_boxes(ws_group, header_row, block["fill"], Font(bold=True, color="000000"),
+                         Font(bold=True, color="008000"), block["out_shift"], block["key"])
+    
+    # The left-most block owns the top-left corner, above the copied data; the
+    # rest shade the columns their own box sits over.
+    for block in data_blocks:
+        if block["top_shift"] == 0:
+            min_col, max_col_fill = 1, MAX_GROUP_COL
+        else:
+            min_col, max_col_fill = 1 + block["top_shift"], 16 + block["top_shift"]
+        for row in ws_group.iter_rows(min_row=1, max_row=blue_box_bottom,
+                                      min_col=min_col, max_col=max_col_fill):
             for cell in row:
-                cell.fill = co2_fill
+                cell.fill = block["fill"]
+        # Re-applied after the shading, which would otherwise bury it.
+        if block["key"] == "CO2":
+            write_co2_temp_tag(ws_group, block["top_shift"])
             
     headers = []
     first_row_cells = list(ws_last6[1]) if ws_last6.max_row >= 1 else []
@@ -1009,6 +1383,10 @@ def step6_normalization_carbonate(file_path):
 
     # --- THEORETICAL & YIELD HEADERS CREATION (MULTI-TIERED) ---
     theo_col = YIELD_START_COL + 1
+    
+    # Right-most column anything is drawn in. Row-wide shading stops here, so
+    # it covers every block without running on to the edge of the sheet.
+    last_layout_col = max(MAX_GROUP_COL, LAST_LAYOUT_COL)
     
     if calc_yield:
         if num_yield_groups > 0:
@@ -1099,9 +1477,6 @@ def step6_normalization_carbonate(file_path):
             groups[norm] = {"base": base, "rows": []}
         groups[norm]["rows"].append((original_row_idx, r_values, r_formats)) 
         
-    for g in groups.values():
-        g["rows"].sort(key=lambda item: extract_run_number(item[1][col_identifier1 - 1]))
-        
     carb_materials = settings.get_setting("REFERENCE_MATERIALS", sub_key="Carbonate") or []
 
     # --- Fetch UI settings for manual Drag & Drop mapping ---
@@ -1141,11 +1516,22 @@ def step6_normalization_carbonate(file_path):
 
     ref_groups = []
     other_groups = []
+    col_time_code = col_map.get(2, 0)
     for norm, g in groups.items():
         if is_reference_group(g["base"]):
+            # Every run of a standard belongs in its slope: one group, by run number.
+            g["rows"].sort(key=lambda item: extract_run_number(item[1][col_identifier1 - 1]))
             ref_groups.append((norm, g))
         else:
-            other_groups.append((norm, g))
+            # A sample re-measured under the same name (A r1-r3 on DAY 12,
+            # again on DAY 9, ...) gets one group per session, already in
+            # measurement order. Split before any sort: sorting by run number
+            # first is what interleaved the sessions as r1, r1, ..., r2, r2.
+            for session_rows in split_into_sessions(
+                    g["rows"],
+                    ident_of=lambda item: item[1][col_identifier1 - 1],
+                    time_of=lambda item: item[1][col_time_code - 1] if col_time_code else None):
+                other_groups.append((norm, {"base": g["base"], "rows": session_rows}))
 
     present_refs_norm = {norm for norm, _ in ref_groups}
     has_iaea_603 = 'iaea603' in present_refs_norm
@@ -1160,18 +1546,15 @@ def step6_normalization_carbonate(file_path):
         if num_groups == 0:
             return 27 + output_offset
         
-        c_start = 19 + output_offset
-        o_calc_start = c_start + num_groups + 1
-        o_arag_start = o_calc_start + num_groups + 1
+        layout = get_output_layout(num_groups, output_offset)
+        is_arag = is_arag and layout["include_arag"]
+        c_start = layout["c_start"]
+        o_calc_start = layout["o_calc_start"]
+        o_arag_start = layout["o_arag_start"]
+        vsmow_calc_start = layout["vsmow_calc_start"]
+        vsmow_arag_start = layout["vsmow_arag_start"]
         
-        box1_start = c_start
-        box1_end = o_arag_start + num_groups - 1
-        
-        box2_start = box1_end + 2
-        vsmow_calc_start = box2_start
-        vsmow_arag_start = vsmow_calc_start + num_groups + 1
-        
-        col_AA_approx = vsmow_arag_start + num_groups - 1
+        col_AA_approx = layout["box2_end"]
         
         green_bold = Font(color="008000", bold=True)
         
@@ -1185,11 +1568,11 @@ def step6_normalization_carbonate(file_path):
             c_formula = f'=IFERROR(${c_slope_col}${s_row}*{get_column_letter(new_R_col)}{r}+${c_slope_col}${i_row},"")'
             o_formula = f'=IFERROR(${o_slope_col}${s_row}*{get_column_letter(new_U_col)}{r}+${o_slope_col}${i_row},"")'
             
-            c_col = c_start + i
-            o_calc_col = o_calc_start + i
-            o_arag_col = o_arag_start + i
-            vsmow_calc_col = vsmow_calc_start + i
-            vsmow_arag_col = vsmow_arag_start + i
+            c_col = out_col(c_start, i)
+            o_calc_col = out_col(o_calc_start, i)
+            o_arag_col = out_col(o_arag_start, i) if o_arag_start else None
+            vsmow_calc_col = out_col(vsmow_calc_start, i)
+            vsmow_arag_col = out_col(vsmow_arag_start, i) if vsmow_arag_start else None
             
             cell_c = ws.cell(row=r, column=c_col, value=c_formula)
             cell_c.number_format = output_format
@@ -1210,8 +1593,9 @@ def step6_normalization_carbonate(file_path):
                 for col_idx in (c_col, o_arag_col, vsmow_arag_col):
                     ws.cell(row=r, column=col_idx).font = green_bold
             else:
-                ws.cell(row=r, column=o_arag_col, value=None)
-                ws.cell(row=r, column=vsmow_arag_col, value=None)
+                if o_arag_col:
+                    ws.cell(row=r, column=o_arag_col, value=None)
+                    ws.cell(row=r, column=vsmow_arag_col, value=None)
                 
                 cell_o_calc = ws.cell(row=r, column=o_calc_col, value=o_formula)
                 cell_o_calc.number_format = output_format
@@ -1265,16 +1649,19 @@ def step6_normalization_carbonate(file_path):
                     dest_cell.font = new_font
                     
             if base_name in ("co2", "heco2") and i in valid_indices:
-                for col in range(1, MAX_GROUP_COL + 1):
+                # Every cell gets the fill explicitly: a cell that already has
+                # its own font or number format (the normalized output cells do)
+                # carries its own empty fill too, which paints white over any
+                # row-level shading.
+                for col in range(1, last_layout_col + 1):
                     ws_group.cell(row=excel_row, column=col).fill = gray_fill
                     
             ident_val = str(ws_group.cell(row=excel_row, column=col_identifier1).value or "")
             is_arag = n_arag_re.search(ident_val)
             
-            _write_sample_output_cells(ws_group, excel_row, bool(is_arag), has_iaea_603, 11, 14, '0.00', carb_slope_info, 0, 0)
-            
-            if calc_co2:
-                _write_sample_output_cells(ws_group, excel_row, bool(is_arag), has_iaea_603, 11, 14, '0.00', co2_slope_info, CO2_TOP_SHIFT, CO2_OUT_SHIFT)
+            for block in data_blocks:
+                _write_sample_output_cells(ws_group, excel_row, bool(is_arag), has_iaea_603, 11, 14,
+                                           '0.00', block["slope_info"], block["top_shift"], block["out_shift"])
             
             # --- THEORETICAL & YIELD FORMULA INJECTION ---
             if calc_yield and base_name not in ("co2", "heco2"):
@@ -1301,10 +1688,23 @@ def step6_normalization_carbonate(file_path):
                     yp_cell = ws_group.cell(row=excel_row, column=yield_pct_col, value=f'=IFERROR(({get_column_letter(calc_col)}{excel_row}/{get_column_letter(theo_col)}{excel_row})*100,"")')
                     yp_cell.number_format = '0.00'
 
+            # A run with the wrong peak count is unreliable for any material,
+            # so it stays on the sheet but out of every average.
+            is_flagged = has_peak_count_flag(row_values_filtered[CO2_PEAK_FLAG_COL - 1]
+                                             if len(row_values_filtered) >= CO2_PEAK_FLAG_COL else None)
+
             should_process = True
-            if base_name in ("co2", "heco2") and i not in valid_indices:
+            if (base_name in ("co2", "heco2") and i not in valid_indices) or is_flagged:
                 should_process = False
                 c_vals.append(None); o_vals.append(None)
+
+            if is_flagged:
+                # Struck in the cell's own colour, so a flagged run reads
+                # differently from a red sigma outlier.
+                strike_flagged_cells(ws_group, excel_row, (11, 14))
+                for block in data_blocks:
+                    strike_output_cells(ws_group, excel_row, len(block["slope_info"]), bool(is_arag),
+                                        block["out_shift"], True, True, color=None)
             
             if should_process:
                 valid_run_row_indices.append(i)
@@ -1341,14 +1741,19 @@ def step6_normalization_carbonate(file_path):
             # run can lose its C value to an outlier but keep its O value.
             final_runs_c = []; final_runs_o = []
 
+            # Same split, as bare row numbers: the normalized output blocks need
+            # to average their own columns over exactly these rows.
+            all_rows_c = []; all_rows_o = []
+            final_rows_c = []; final_rows_o = []
+
             c_col_let = "K"; o_col_let = "N"
 
             for i in valid_run_row_indices:
                 r_num = row_map[i]
                 vc = c_vals[i]; vo = o_vals[i]
 
-                if vc is not None: all_runs_c.append(f"{c_col_let}{r_num}")
-                if vo is not None: all_runs_o.append(f"{o_col_let}{r_num}")
+                if vc is not None: all_runs_c.append(f"{c_col_let}{r_num}"); all_rows_c.append(r_num)
+                if vo is not None: all_runs_o.append(f"{o_col_let}{r_num}"); all_rows_o.append(r_num)
 
                 is_c_out = (vc > c_up or vc < c_low) if (vc is not None and len(valid_c_nums) > 2) else False
                 is_o_out = (vo > o_up or vo < o_low) if (vo is not None and len(valid_o_nums) > 2) else False
@@ -1362,15 +1767,40 @@ def step6_normalization_carbonate(file_path):
                 
                 # A value joins the filtered average only if it exists and was
                 # not excluded for its own column (same rule as step5_group.py).
-                if not exclude_c and vc is not None: final_runs_c.append(f"{c_col_let}{r_num}")
-                if not exclude_o and vo is not None: final_runs_o.append(f"{o_col_let}{r_num}")
+                if not exclude_c and vc is not None: final_runs_c.append(f"{c_col_let}{r_num}"); final_rows_c.append(r_num)
+                if not exclude_o and vo is not None: final_runs_o.append(f"{o_col_let}{r_num}"); final_rows_o.append(r_num)
                 
                 if exclude_c and vc is not None: ws_group.cell(row=r_num, column=11).font = strike_font
                 if exclude_o and vo is not None: ws_group.cell(row=r_num, column=14).font = strike_font
+                
+                strike_c = exclude_c and vc is not None
+                strike_o = exclude_o and vo is not None
+                if strike_c or strike_o:
+                    row_is_arag = n_arag_re.search(str(ws_group.cell(row=r_num, column=col_identifier1).value or ""))
+                    for block in data_blocks:
+                        strike_output_cells(ws_group, r_num, len(block["slope_info"]), bool(row_is_arag),
+                                            block["out_shift"], strike_c, strike_o)
         
             summary_font = font_color or Font(bold=True)
             if is_reference and font_color:
                 summary_font = copy(font_color); summary_font.bold = True
+            
+            is_arag_group = n_arag_re.search(g["base"])
+            
+            # Normalized stats carry the material's colour; an uncoloured
+            # aragonite sample follows its column and goes green.
+            norm_font = copy(summary_font)
+            norm_font.bold = True
+            if is_arag_group and not font_color:
+                norm_font = Font(color="008000", bold=True)
+            
+            
+            # The normalized blocks only repeat their stats when an outlier
+            # actually dropped a run; otherwise the second set would just copy
+            # the first. The raw K-P summary still always shows both.
+            c_has_outlier = set(all_rows_c) != set(final_rows_c)
+            o_has_outlier = set(all_rows_o) != set(final_rows_o)
+            any_outlier = c_has_outlier or o_has_outlier
             
             data_fmt = get_summary_num_format(base_name); count_fmt = '0'
 
@@ -1379,6 +1809,10 @@ def step6_normalization_carbonate(file_path):
             for col, txt in zip([11, 12, 13, 14, 15, 16], ["Average", "Stdev", "Count", "Average", "Stdev", "Count"]):
                 c = ws_group.cell(row=row_all, column=col, value=txt)
                 c.font = summary_font; c.alignment = Alignment(horizontal="right")
+            
+            for block in data_blocks:
+                write_summary_output_labels(ws_group, row_all, len(block["slope_info"]),
+                                            bool(is_arag_group), block["out_shift"], norm_font)
                 
             if calc_yield and base_name not in ("co2", "heco2"):
                 for grp_idx in range(num_yield_groups):
@@ -1410,21 +1844,22 @@ def step6_normalization_carbonate(file_path):
                         ws_group.cell(row=row_all_calc, column=yield_pct_col, value=f'=IFERROR(AVERAGE({y_range_str}),"")').number_format = '0.00'
                         ws_group.cell(row=row_all_calc, column=yield_pct_col).font = summary_font
 
-            is_arag_group = n_arag_re.search(g["base"])
-            _write_sample_output_cells(ws_group, row_all_calc, bool(is_arag_group), has_iaea_603, 11, 14, '0.00', carb_slope_info, 0, 0)
-            if calc_co2:
-                _write_sample_output_cells(ws_group, row_all_calc, bool(is_arag_group), has_iaea_603, 11, 14, '0.00', co2_slope_info, CO2_TOP_SHIFT, CO2_OUT_SHIFT)
-
-            for col_rng in [range(19+0, 32+0), range(19+CO2_OUT_SHIFT, 32+CO2_OUT_SHIFT)]: 
-                for c in col_rng:
-                    if ws_group.cell(row=row_all_calc, column=c).value: 
-                        ws_group.cell(row=row_all_calc, column=c).font = Font(bold=True)
+            for block in data_blocks:
+                write_summary_output_cells(ws_group, row_all_calc, len(block["slope_info"]),
+                                           bool(is_arag_group), all_rows_c, all_rows_o, '0.00',
+                                           block["out_shift"], norm_font)
 
             row_filt = row_all_calc + 1
             ws_group.cell(row=row_filt, column=10, value="Outlier Excl.").font = Font(bold=True) 
             for col, txt in zip([11, 12, 13, 14, 15, 16], ["Average", "Stdev", "Count", "Average", "Stdev", "Count"]):
                 c = ws_group.cell(row=row_filt, column=col, value=txt)
                 c.font = summary_font; c.alignment = Alignment(horizontal="right")
+            
+            if any_outlier:
+                for block in data_blocks:
+                    write_summary_output_labels(ws_group, row_filt, len(block["slope_info"]),
+                                                bool(is_arag_group), block["out_shift"], norm_font,
+                                                c_has_outlier, o_has_outlier, outlier_marker=True)
 
             row_filt_calc = row_filt + 1
             
@@ -1445,14 +1880,13 @@ def step6_normalization_carbonate(file_path):
 
             for c in range(11, 17): ws_group.cell(row=row_filt_calc, column=c).font = summary_font
 
-            _write_sample_output_cells(ws_group, row_filt_calc, bool(is_arag_group), has_iaea_603, 11, 14, '0.00', carb_slope_info, 0, 0)
-            if calc_co2:
-                _write_sample_output_cells(ws_group, row_filt_calc, bool(is_arag_group), has_iaea_603, 11, 14, '0.00', co2_slope_info, CO2_TOP_SHIFT, CO2_OUT_SHIFT)
-
-            for col_rng in [range(19+0, 32+0), range(19+CO2_OUT_SHIFT, 32+CO2_OUT_SHIFT)]: 
-                for c in col_rng:
-                    if ws_group.cell(row=row_filt_calc, column=c).value: 
-                        ws_group.cell(row=row_filt_calc, column=c).font = Font(bold=True)
+            if any_outlier:
+                filt_c = final_rows_c if c_has_outlier else None
+                filt_o = final_rows_o if o_has_outlier else None
+                for block in data_blocks:
+                    write_summary_output_cells(ws_group, row_filt_calc, len(block["slope_info"]),
+                                               bool(is_arag_group), filt_c, filt_o, '0.00',
+                                               block["out_shift"], norm_font)
 
             current_row = row_filt_calc + 2 
         else:
@@ -1464,8 +1898,11 @@ def step6_normalization_carbonate(file_path):
     if ref_groups:
         current_row += 8
         divider_top_row = current_row 
+        # The divider has to reach past the right-most block, which now grows
+        # with the slope-group count.
+        divider_end_col = max(701, LAST_LAYOUT_COL)
         for _ in range(2):
-            for col in range(1, 702):
+            for col in range(1, divider_end_col + 1):
                 ws_group.cell(row=current_row, column=col).fill = dark_fill
             current_row += 1
             
@@ -1542,16 +1979,16 @@ def step6_normalization_carbonate(file_path):
 
         current_row += 1
         
-        draw_lower_boxes(ws_group, divider_top_row, carb_fill, Font(bold=True, color="000000"), Font(bold=True, color="008000"), 0, "Carbonate")
-        if calc_co2:
-            draw_lower_boxes(ws_group, divider_top_row, co2_fill, Font(bold=True, color="000000"), Font(bold=True, color="008000"), CO2_OUT_SHIFT, "CO2")
+        for block in data_blocks:
+            draw_lower_boxes(ws_group, divider_top_row, block["fill"], Font(bold=True, color="000000"),
+                             Font(bold=True, color="008000"), block["out_shift"], block["key"])
         
     for norm, g in other_groups:
         write_group(norm, g, is_reference=False, has_iaea_603=has_iaea_603)
         
-    populate_blue_box_math(ws_group, carb_slope_info, carb_mat_map, 0, "Carbonate")
-    if calc_co2:
-        populate_blue_box_math(ws_group, co2_slope_info, co2_mat_map, CO2_TOP_SHIFT, "CO2")
+    for block in data_blocks:
+        populate_blue_box_math(ws_group, block["slope_info"], block["mat_map"],
+                               block["top_shift"], block["key"])
     
     # --- YIELD SLOPE & INTERCEPT DYNAMIC POPULATION ---
     if calc_yield:
@@ -1575,9 +2012,8 @@ def step6_normalization_carbonate(file_path):
             yield_slope_row = 20 + (grp_idx * 3)
             group_rows = []
             for mat in group:
-                mat_clean = re.sub(r'[\s\-_]+', '', mat.upper()).replace("STD", "")
                 for key, rows in yield_mat_row_map.items():
-                    if mat_clean in key.upper() or key.upper() in mat_clean:
+                    if _yield_name_matches(mat, key):
                         group_rows.extend(rows)
                         
             if len(group_rows) >= 2:
@@ -1615,10 +2051,7 @@ def step6_normalization_carbonate(file_path):
     ws_group.column_dimensions["H"].width = 15 
     ws_group.column_dimensions["J"].width = 16 
 
-    offsets = [0]
-    if calc_co2: offsets.append(CO2_TOP_SHIFT)
-    
-    for offset in offsets:
+    for offset in [b["top_shift"] for b in data_blocks]:
         ws_group.column_dimensions[get_column_letter(3 + offset)].width = 22
         ws_group.column_dimensions[get_column_letter(6 + offset)].width = 12
         ws_group.column_dimensions[get_column_letter(7 + offset)].width = 12
@@ -1626,12 +2059,23 @@ def step6_normalization_carbonate(file_path):
         ws_group.column_dimensions[get_column_letter(11 + offset)].width = 12
         ws_group.column_dimensions[get_column_letter(14 + offset)].width = 12
         
-    out_offsets = [0]
-    if calc_co2: out_offsets.append(CO2_OUT_SHIFT)
-    
-    for output_offset in out_offsets:
-        for output_col in range(19 + output_offset, 30 + output_offset):
-            ws_group.column_dimensions[get_column_letter(output_col)].width = 12
+    for output_offset, n_out_groups in [(b["out_shift"], len(b["slope_info"])) for b in data_blocks]:
+        if n_out_groups <= 0:
+            continue
+        out_layout = get_output_layout(n_out_groups, output_offset)
+        # Spacers carry the "Outlier Excl." marker, so they set the pace; the
+        # value column holds "Average", Stdev and Count need far less.
+        for output_col in range(out_layout["box1_start"] - 1, out_layout["box2_end"] + 1):
+            ws_group.column_dimensions[get_column_letter(output_col)].width = 14
+        for section in ("c_start", "o_calc_start", "o_arag_start", "vsmow_calc_start", "vsmow_arag_start"):
+            start = out_layout[section]
+            if not start:
+                continue
+            for i in range(n_out_groups):
+                base = out_col(start, i)
+                ws_group.column_dimensions[get_column_letter(base)].width = 12
+                ws_group.column_dimensions[get_column_letter(base + 1)].width = 9
+                ws_group.column_dimensions[get_column_letter(base + 2)].width = 7
             
     if calc_yield:
         ws_group.column_dimensions[get_column_letter(YIELD_START_COL + 1)].width = 15 

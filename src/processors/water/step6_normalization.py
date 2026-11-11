@@ -6,55 +6,195 @@ from copy import copy
 import re
 from datetime import datetime
 import utils.settings as settings
+from utils.colors import material_color_hex
 from utils.common_utils import embed_settings_popup, save_workbook_atomic
 
 # --- Helper Functions for He/CO2 Logic ---
+# Step 5 imports select_valid_heco2_rows() and the flag columns from here.
+# Both steps have to reach the same verdict about which He/CO2 runs count -
+# step 5 decides which rows get the gray "valid run" fill and feed the group
+# stats, step 6 decides which keep that fill on the Normalization sheet - so
+# the rules live in one place instead of being written out twice.
+
+# An identifier with no rN suffix at all. Kept out of the real run numbers so
+# it can never collide with one.
+UNNUMBERED_RUN = 9999
+
+# Step 1 writes a peak-count flag next to the C and O stats whenever a run did
+# not produce the expected number of peaks - "<11 (5)" or ">11 (18)". Such a
+# run is unreliable and must not represent its rN. The carbonate processor
+# writes the same flag as "> 11: 18", so both spellings are accepted.
+PEAK_FLAG_RE = re.compile(r"^\s*[<>]\s*\d+\s*[:(]\s*\d+\s*\)?\s*$")
+
+# Where that flag sits after each step's column reshuffle. Step 1 writes it
+# twice, once beside the C stats and once beside the O stats; the extra column
+# listed for each sheet is a spare that carries no data, so scanning it too
+# costs nothing and keeps this working if the flag is ever moved one over.
+# Nothing but a flag can match PEAK_FLAG_RE, so a wider scan is safe.
+LAST6_PEAK_FLAG_COLS = (14, 18, 21)   # 'Data_DNT' / 'To Sort_DNT' / 'Last 6_DNT'
+GROUP_PEAK_FLAG_COLS = (9, 13, 16)    # 'Group_DNT' / 'Normalization_DNT'
+
+# Trailing " r2", " r2.1", " r2a" on an identifier.
+RUN_SUFFIX_RE = re.compile(r'\s+[rR]\d+(?:\.\d+)*(?:[a-zA-Z]*)?$')
+
+
+def has_peak_count_flag(*values):
+    """True when any of the cells handed in carries a peak-count flag."""
+    for v in values:
+        if v is None:
+            continue
+        if PEAK_FLAG_RE.match(str(v).strip()):
+            return True
+    return False
+
+
+def strip_run_suffix_ident(identifier):
+    """'MRSI W1 r2.1' -> 'MRSI W1'."""
+    if identifier is None:
+        return ""
+    return RUN_SUFFIX_RE.sub('', str(identifier).strip()).strip()
+
 
 def extract_run_number(identifier):
+    """(major, minor) of an rN suffix; major is UNNUMBERED_RUN when there is none."""
     if not identifier:
-        return None, None
-    match = re.search(r'(?i)[rR](\d+)(?:\.(\d+))?', str(identifier))
+        return UNNUMBERED_RUN, 0
+    match = re.search(r'(?i)r(\d+)(?:\.(\d+))?', str(identifier))
     if match:
-        major = int(match.group(1))
-        minor = int(match.group(2)) if match.group(2) else 0
-        return major, minor
-    return None, None
+        return int(match.group(1)), int(match.group(2) or 0)
+    return UNNUMBERED_RUN, 0
+
+
+def _drop_heco2_prefix(raw):
+    """Strip the leading He/CO2 tag so its digits cannot read as a run number."""
+    low = raw.lower()
+    if low.startswith("heco2"):
+        return "co2" + raw[len("heco2"):]
+    if low.startswith("co2"):
+        return "co2" + raw[len("co2"):]
+    return raw
+
+
+def select_valid_heco2_rows(entries, active_samples=None):
+    """Pick the He/CO2 runs worth keeping.
+
+    `entries` is an ordered sequence of (key, identifier, flag_values). The
+    returned set holds the keys of the rows to keep; a key is whatever the
+    caller uses to name a row (a sheet row number, a list index, ...).
+
+    Numbered runs collapse to one row per rN - the lowest sub-run, with r1
+    skipped as the conditioning run. Runs written without any rN are each
+    their own run: collapsing those would silently keep the first one and
+    drop every later one. A run whose chosen representative carries a
+    peak-count flag is dropped altogether; the flag is only read once a run
+    has its representative, because a bad r2.1 means run 2 is bad, not that
+    r2.2 should stand in for it.
+    """
+    if active_samples is None:
+        active_samples = settings.get_setting("ACTIVE_SAMPLES") or []
+
+    seen_majors = {}
+    unnumbered = []
+    flagged = {}
+
+    for key, identifier, flag_values in entries:
+        raw = str(identifier or "").strip()
+        if not raw:
+            continue
+
+        # The manual drag & drop sample list always wins over the heuristics.
+        if raw in active_samples or strip_run_suffix_ident(raw) in active_samples:
+            continue
+
+        low = raw.lower()
+        if "heco2" not in low and "co2" not in low:
+            continue
+
+        major, minor = extract_run_number(_drop_heco2_prefix(raw))
+        flagged[key] = has_peak_count_flag(*flag_values)
+
+        if major == UNNUMBERED_RUN:
+            unnumbered.append(key)
+            continue
+        if major == 1:
+            continue
+        if major not in seen_majors or minor < seen_majors[major][0]:
+            seen_majors[major] = (minor, key)
+
+    chosen = [key for _, key in seen_majors.values()] + unnumbered
+    return {k for k in chosen if not flagged.get(k)}
+
 
 def get_valid_heco2_indices(ws):
-    valid_rows = set()
-    seen_majors = {} 
-    max_row = ws.max_row
-    
-    # --- Fetch samples list to override heuristics ---
-    active_samples = settings.get_setting("ACTIVE_SAMPLES") or []
-    
-    for r in range(1, max_row + 1):
+    """'Group_DNT' rows holding the He/CO2 runs that count.
+
+    Shares select_valid_heco2_rows() with step 5 so the gray "valid run"
+    fill means the same thing on both sheets: one row per rN (lowest
+    sub-run, r1 skipped), every un-numbered run kept on its own, and any run
+    carrying step 1's peak-count flag dropped.
+    """
+    entries = []
+    for r in range(1, ws.max_row + 1):
         val = ws.cell(row=r, column=3).value
         if not val:
             continue
-            
-        raw_val = str(val).strip()
-        
-        base_ident = re.sub(r'\s+[rR]\d+(?:\.\d+)*(?:[a-zA-Z]*)?$', '', raw_val).strip()
-        
-        # 1. Trust the manual UI Drag & Drop lists completely
-        if base_ident in active_samples or raw_val in active_samples:
-            continue
-            
-        s_val = raw_val.lower()
-        if "heco2" in s_val or "co2" in s_val:
-            major, minor = extract_run_number(s_val)
-            if major is None or major == 1: 
-                continue
-            if major not in seen_majors:
-                seen_majors[major] = (minor, r)
-            else:
-                prev_minor, prev_r = seen_majors[major]
-                if minor < prev_minor:
-                    seen_majors[major] = (minor, r)
-    for _, row_idx in seen_majors.values():
-        valid_rows.add(row_idx)
-    return valid_rows
+        flags = [ws.cell(row=r, column=c).value for c in GROUP_PEAK_FLAG_COLS]
+        entries.append((r, val, flags))
+    return select_valid_heco2_rows(entries)
+
+# --- Carrying Step 5's formulas across ------------------------------------
+# Step 5 writes its Average / Stdev / Count cells as real formulas over the
+# runs directly above them. Copying only the cached result turned those into
+# bare numbers here, so clicking a cell no longer showed which runs it came
+# from. The formulas cannot be copied verbatim either - rows move when the
+# block is copied onto this sheet, and move again every time this step
+# inserts a summary block - so every row number inside them is remapped
+# through the Group_DNT -> Normalization_DNT row map instead.
+
+# One A1-style reference, e.g. K5 or $K$5. The lookbehind keeps the match out
+# of the middle of a longer token and off sheet-qualified references
+# ("Group_DNT!K5" must not be rewritten, since that sheet does not move); the
+# lookahead keeps it off function names that end in digits, like LOG10(.
+_A1_REF_RE = re.compile(
+    r"(?<![A-Za-z0-9_$!.])(\$?)([A-Za-z]{1,3})(\$?)([1-9][0-9]{0,6})(?![A-Za-z0-9_(])"
+)
+
+# Text inside double quotes is data, not references - the "" in
+# IF(COUNT(..)=0,"",AVERAGE(..)) - so it is held out of the rewrite.
+_STRING_LITERAL_RE = re.compile(r'"(?:[^"]|"")*"')
+
+
+def translate_formula(formula, row_map):
+    """Rewrite a Group_DNT formula for its new row on Normalization_DNT.
+
+    Returns None if the formula points at a row that was not copied, so the
+    caller can keep the cached number rather than write a formula that
+    silently reads the wrong cells.
+    """
+    if not isinstance(formula, str) or not formula.startswith("="):
+        return None
+
+    unmapped = False
+
+    def remap(m):
+        nonlocal unmapped
+        abs_col, col, abs_row, row = m.groups()
+        dst = row_map.get(int(row))
+        if dst is None:
+            unmapped = True
+            return m.group(0)
+        return f"{abs_col}{col}{abs_row}{dst}"
+
+    parts = []
+    pos = 0
+    for lit in _STRING_LITERAL_RE.finditer(formula):
+        parts.append(_A1_REF_RE.sub(remap, formula[pos:lit.start()]))
+        parts.append(lit.group(0))
+        pos = lit.end()
+    parts.append(_A1_REF_RE.sub(remap, formula[pos:]))
+
+    return None if unmapped else "".join(parts)
+
 
 def step6_normalization_water(file_path: str):
     wb = load_workbook(file_path)
@@ -133,12 +273,6 @@ def step6_normalization_water(file_path: str):
     FMT_2_DEC = "0.00"
 
     # --- Dynamic Color & Font Mapping from Settings ---
-    # Map text color names to Hex codes used by openpyxl
-    color_hex_map = {
-        "red": "FF0000", "blue": "0000FF", "darkblue": "00008B",
-        "orange": "E46C0A", "green": "00B050", "lightblue": "5DADE2",
-        "black": "000000"
-    }
 
     water_stds_settings = settings.get_setting("REFERENCE_MATERIALS", "Water")
     slope_groups_settings = settings.get_setting("SLOPE_INTERCEPT_GROUPS", "Water")
@@ -153,10 +287,71 @@ def step6_normalization_water(file_path: str):
     for std in water_stds_settings:
         name = std["col_c"]
         c_name = std.get("color", "black").lower()
-        hex_code = color_hex_map.get(c_name, "000000")
+        hex_code = material_color_hex(c_name)
         
         std_color_map[name] = Font(color=hex_code)
         std_bold_color_map[name] = Font(color=hex_code, bold=True)
+
+    # ==========================================================
+    # === Slope group labels & colours =========================
+    # ==========================================================
+    # A slope/intercept group is named and coloured once, here, so the peach
+    # slope box, the "Water Standard Results" header and the δ¹⁸O SMOW column
+    # header over the data all say the same thing in the same colour - that
+    # colour is the only thing tying a δ¹⁸O SMOW column back to the slope and
+    # intercept it was calculated from.
+
+    GROUP_COLORS = ["0000FF", "00B050", "E46C0A", "7030A0", "C00000", "008080"]
+
+    def short_std_label(name):
+        """'MRSI-STD-W1' -> 'MRSI W1'; 'USGS W-67400' -> 'W-67400'."""
+        s = str(name).strip()
+        s = re.sub(r'(?i)^MRSI[\s\-_]*STD[\s\-_]*', 'MRSI ', s)
+        s = re.sub(r'(?i)^USGS[\s\-_]+', '', s)
+        return re.sub(r'\s+', ' ', s).strip()
+
+    def build_group_label(group_list, sep):
+        names = [str(n).strip() for n in group_list if n and str(n).strip()]
+        if not names:
+            return ""
+        # A group made only of USGS standards is just "USGS": the catalogue
+        # numbers ("W-67400") say nothing at a glance and do not fit the column.
+        if all(re.match(r'(?i)^USGS\b', n) for n in names):
+            return "USGS"
+        shorts = [short_std_label(n) for n in names]
+        # "MRSI W1" + "MRSI W2" -> "MRSI W1, W2" rather than repeating "MRSI".
+        heads = {sh.split(" ", 1)[0] for sh in shorts}
+        if len(heads) == 1 and all(" " in sh for sh in shorts):
+            return heads.pop() + " " + sep.join(sh.split(" ", 1)[1] for sh in shorts)
+        return sep.join(shorts)
+
+    # tuple(sorted(group)) -> {"label" (wide box), "short_label" (column), "color"}
+    group_style_map = {}
+    for grp_idx, grp_list in enumerate(slope_groups_settings or []):
+        key = tuple(sorted(grp_list))
+        if key in group_style_map:
+            continue
+        group_style_map[key] = {
+            "label": build_group_label(grp_list, ", "),
+            "short_label": build_group_label(grp_list, "/"),
+            "color": GROUP_COLORS[grp_idx % len(GROUP_COLORS)],
+        }
+
+    # Two different groups that collapse to the same label (two all-USGS
+    # groups, say) would be indistinguishable, so those spell themselves out.
+    _label_counts = {}
+    for _st in group_style_map.values():
+        _label_counts[_st["short_label"]] = _label_counts.get(_st["short_label"], 0) + 1
+    for key, _st in group_style_map.items():
+        if _label_counts[_st["short_label"]] > 1:
+            _st["label"] = ", ".join(short_std_label(n) for n in key)
+            _st["short_label"] = "/".join(short_std_label(n) for n in key)
+
+    def group_style(group_key):
+        return group_style_map.get(
+            tuple(sorted(group_key)),
+            {"label": "", "short_label": "", "color": "000000"},
+        )
 
     # ==========================================================
     # === Canonical Standard Naming ============================
@@ -353,10 +548,10 @@ def step6_normalization_water(file_path: str):
         is_contiguous = (rows_involved[-1] - rows_involved[0] + 1) == len(rows_involved)
 
         # Render Label
+        style = group_style(group_list)
         lbl_cell = summary_ws.cell(row=current_slope_row, column=9)
-        short_names = [n.replace("MRSI-STD-", "").replace("USGS ", "") for n in group_list]
-        lbl_cell.value = ", ".join(short_names)
-        lbl_cell.font = bold_blue_text_font if grp_idx == 0 else bold_green_text_font 
+        lbl_cell.value = style["label"]
+        lbl_cell.font = Font(bold=True, color=style["color"])
         
         # Render Slope/Int Text
         summary_ws.cell(row=current_slope_row, column=10, value="slope")
@@ -477,16 +672,10 @@ def step6_normalization_water(file_path: str):
     
     # Row 3: Write Group Names (Moved down from Row 2)
     for group_key, col_idx in group_col_map.items():
-        # LOGIC CHANGE: Check if all items in this group are USGS
-        if all("USGS" in n for n in group_key):
-            header_name = "USGS"
-        else:
-            short_names = [n.replace("MRSI-STD-", "").replace("USGS ", "") for n in group_key]
-            header_name = "/".join(short_names)
-        
-        cell = summary_ws.cell(row=3, column=col_idx, value=header_name)
+        style = group_style(group_key)
+        cell = summary_ws.cell(row=3, column=col_idx, value=style["short_label"])
         cell.alignment = center_align
-        cell.font = Font(bold=True, size=9)
+        cell.font = Font(bold=True, size=9, color=style["color"])
     
     # 2. Write STDEV and N headers (Moved to Row 2 to align with top label or keep at 2?)
     # Usually these align with the specific column headers, so let's put them on Row 3 too
@@ -572,15 +761,9 @@ def step6_normalization_water(file_path: str):
 
     # 2. Write Group Names (with Light Blue Fill & Border)
     for group_key, col_idx in group_col_map.items():
-        # LOGIC CHANGE: Check if all items in this group are USGS
-        if all("USGS" in n for n in group_key):
-            header_text = "USGS"
-        else:
-            short_names = [n.replace("MRSI-STD-", "").replace("USGS ", "") for n in group_key]
-            header_text = "/".join(short_names)
-        
-        cell = summary_ws.cell(row=group_header_row, column=col_idx, value=header_text)
-        cell.font = black_bold
+        style = group_style(group_key)
+        cell = summary_ws.cell(row=group_header_row, column=col_idx, value=style["short_label"])
+        cell.font = Font(bold=True, color=style["color"])
         cell.alignment = center_align
         cell.fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid") # Light Blue
         
@@ -712,7 +895,31 @@ def step6_normalization_water(file_path: str):
 
     src_to_dst_row = {}
     dst_row = dest_start_row
-    
+
+    # Step 5's formulas, kept aside as (src_row, col, formula) and rewritten
+    # at the very end of this step - see translate_formula(). They cannot be
+    # written now, because every insert_rows() below would move the cells
+    # they point at without touching the formulas themselves.
+    pending_formulas = []
+
+    def shift_row_pointers(insert_at, amount):
+        """Keep the row bookkeeping honest after an insert_rows() call.
+
+        openpyxl moves the cells but nothing that records where they were, so
+        both the per-group pointers and the Group_DNT -> Normalization_DNT row
+        map have to be shifted by hand. The latter is what lets the deferred
+        formula rewrite still land on the right rows.
+        """
+        for gi in group_infos:
+            for key in ('dst_data_start', 'dst_data_end', 'dst_calc_mid',
+                        'dst_avg_row', 'dst_stdev_row'):
+                v = gi.get(key)
+                if v is not None and v >= insert_at:
+                    gi[key] = v + amount
+        for s_r, d_r in src_to_dst_row.items():
+            if d_r >= insert_at:
+                src_to_dst_row[s_r] = d_r + amount
+
     # Copy Data
     for src_r in range(1, group_ws.max_row + 1):
         is_valid_heco2 = (src_r in valid_heco2_src_rows)
@@ -728,7 +935,11 @@ def step6_normalization_water(file_path: str):
             src_cell = group_ws.cell(row=src_r, column=col_idx)
             val_cell = group_values_ws.cell(row=src_r, column=col_idx)
             dest_cell = summary_ws.cell(row=dst_row, column=col_idx)
+            # The cached number goes in now so every check further down this
+            # step still reads a value; the formula replaces it at the end.
             dest_cell.value = val_cell.value
+            if src_cell.data_type == "f" and isinstance(src_cell.value, str):
+                pending_formulas.append((src_r, col_idx, src_cell.value))
             try:
                 if src_cell.has_style:
                     dest_cell.font = copy(src_cell.font)
@@ -967,10 +1178,7 @@ def step6_normalization_water(file_path: str):
                 summary_ws.conditional_formatting.add(f"O{value_row}", rule_O)
 
         # Shift downstream group pointers
-        for gi in group_infos:
-            for key in ['dst_data_start', 'dst_data_end', 'dst_calc_mid']:
-                if gi[key] is not None and gi[key] >= insert_at:
-                    gi[key] += 3
+        shift_row_pointers(insert_at, 3)
 
         # Link Top Blue Box (Rows 5-8) to this new "All" block
         ref_base = action['ref_base']
@@ -1111,9 +1319,7 @@ def step6_normalization_water(file_path: str):
         if summary_ws.cell(row=avg_row, column=col_S).value is not None:
             summary_ws.insert_rows(avg_row, amount=1)
             # Update pointers for subsequent groups
-            for gi2 in group_infos:
-                for key in ['dst_data_start', 'dst_data_end', 'dst_calc_mid']:
-                    if gi2.get(key) is not None and gi2[key] >= avg_row: gi2[key] += 1
+            shift_row_pointers(avg_row, 1)
             if de >= avg_row: de += 1
             if calc_mid and calc_mid >= avg_row: calc_mid += 1
 
@@ -1127,17 +1333,20 @@ def step6_normalization_water(file_path: str):
         gi['dst_stdev_row'] = avg_row
         
         # Calculate Per-Column Stats (Average on Top, STDEV Below)
+        # Each block summary carries its group's colour, matching the column
+        # header above it and the slope/intercept pair it was built from.
         for group_key, col_idx in group_col_map.items():
             col_let = get_column_letter(col_idx)
             rng = f"{col_let}{ds}:{col_let}{de}"
+            grp_font = Font(bold=True, color=group_style(group_key)["color"])
             
             # Row 1: Average
             c = summary_ws.cell(row=avg_row - 1, column=col_idx, value=f"=IF(COUNT({rng})=0,\"\",AVERAGE({rng}))")
-            c.font = Font(bold=True); c.number_format = FMT_2_DEC
+            c.font = grp_font; c.number_format = FMT_2_DEC
             
             # Row 2: STDEV
             c = summary_ws.cell(row=avg_row, column=col_idx, value=f"=IF(COUNT({rng})=0,\"\",STDEV({rng}))")
-            c.font = Font(bold=True); c.number_format = FMT_2_DEC
+            c.font = grp_font; c.number_format = FMT_2_DEC
         
         # Block Summary Stats (Far Right)
         all_cols_range = f"{get_column_letter(start_calc_col)}{ds}:{get_column_letter(last_calc_col)}{de}"
@@ -1273,6 +1482,26 @@ def step6_normalization_water(file_path: str):
                 cell = summary_ws.cell(row=target_row, column=c_idx)
                 cell.font = copy(base_color)
                 cell.alignment = center_align
+
+    # --- Restore Step 5's Formulas ---
+    # Last thing before saving, so every insert_rows() above has already
+    # happened and src_to_dst_row is final. Each formula is rewritten for its
+    # new rows; one that cannot be rewritten keeps the cached number it was
+    # given during the copy, which is what this step used to do for all of
+    # them. See translate_formula().
+    restored = 0
+    for src_r, col_idx, formula in pending_formulas:
+        dst_r = src_to_dst_row.get(src_r)
+        if dst_r is None:
+            continue
+        rewritten = translate_formula(formula, src_to_dst_row)
+        if rewritten is None:
+            continue
+        summary_ws.cell(row=dst_r, column=col_idx).value = rewritten
+        restored += 1
+
+    if pending_formulas:
+        print(f"ℹ️ Step 6: carried over {restored}/{len(pending_formulas)} Step 5 formulas")
 
     # --- Final Polish & Save ---
     

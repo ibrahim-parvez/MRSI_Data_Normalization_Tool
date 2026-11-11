@@ -10,6 +10,12 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border
 from openpyxl.formatting.rule import CellIsRule 
 import utils.settings as settings 
 from utils.common_utils import embed_settings_popup, save_workbook_atomic
+# The He/CO2 run-selection rules live in step 6 so both steps use one copy
+# of them; step 6 does not import this module, so this direction is safe.
+from processors.water.step6_normalization import (
+    LAST6_PEAK_FLAG_COLS,
+    select_valid_heco2_rows,
+)
 
 # --- Constants & Styles ---
 fill_error = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
@@ -21,48 +27,24 @@ THREE_DECIMAL_FORMAT = "0.000"
 
 # --- Helper Functions ---
 
-def extract_run_number(identifier):
-    """Parses strings like 'r1', 'r2.1' into (major, minor)."""
-    if not identifier: return None, None
-    match = re.search(r'(?i)[rR](\d+)(?:\.(\d+))?', str(identifier))
-    if match:
-        major = int(match.group(1))
-        minor = int(match.group(2)) if match.group(2) else 0
-        return major, minor
-    return None, None
+def get_valid_heco2_source_rows(df, source_ws_vals):
+    """'Last 6_DNT' rows holding the He/CO2 runs that count.
 
-def get_valid_heco2_source_rows(df):
-    """Finds valid HeCO2 rows (lowest minor for each major, skipping r1)."""
-    valid_source_rows = set()
-    seen_majors = {} 
-    
-    # --- Fetch samples list to override heuristics ---
-    active_samples = settings.get_setting("ACTIVE_SAMPLES") or []
-    
+    Uses step 6's select_valid_heco2_rows() so both steps reach the same
+    verdict: one row per rN (lowest sub-run, r1 skipped), every un-numbered
+    run kept on its own, and any run carrying step 1's peak-count flag
+    dropped.
+    """
+    entries = []
     for _, row in df.iterrows():
-        raw_ident = str(row['Identifier 1']).strip()
-        
-        base_ident = re.sub(r'\s+[rR]\d+(?:\.\d+)*(?:[a-zA-Z]*)?$', '', raw_ident).strip()
-        
-        # 1. Trust the manual UI Drag & Drop lists completely
-        if base_ident in active_samples or raw_ident in active_samples:
+        s_row = row['Source_Row']
+        if pd.isna(s_row):
             continue
-            
-        ident = raw_ident.lower()
-        if 'heco2' in ident or 'co2' in ident:
-            major, minor = extract_run_number(ident)
-            if major is None or major == 1: continue
-            
-            if major not in seen_majors:
-                seen_majors[major] = (minor, row['Source_Row'])
-            else:
-                prev_minor, prev_row = seen_majors[major]
-                if minor < prev_minor:
-                    seen_majors[major] = (minor, row['Source_Row'])
-                    
-    for _, s_row in seen_majors.values():
-        valid_source_rows.add(s_row)
-    return valid_source_rows
+        s_row = int(s_row)
+        flags = [source_ws_vals.cell(row=s_row, column=c).value
+                 for c in LAST6_PEAK_FLAG_COLS]
+        entries.append((s_row, row['Identifier 1'], flags))
+    return select_valid_heco2_rows(entries)
 
 def get_stats_and_bounds(values, sigma=2):
     """Calculates Mean, Stdev, and Sigma Bounds (default 2-sigma)."""
@@ -252,7 +234,7 @@ def step5_group_water(file_path: str):
     df['Group_Key'] = pd.Categorical(df['Group_Key'], categories=ordered_groups, ordered=True)
     df_sorted = df.sort_values(by=['Group_Key', 'Line_num', 'Source_Row']).reset_index(drop=True)
     
-    valid_heco2_rows = get_valid_heco2_source_rows(df)
+    valid_heco2_rows = get_valid_heco2_source_rows(df, source_ws_vals)
 
     # --- 4. Write to Excel ---
     target_sheet = "Pre-Group_DNT"

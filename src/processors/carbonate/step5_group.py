@@ -8,7 +8,9 @@ from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.formatting.rule import FormulaRule
 import utils.settings as settings
+from utils.colors import material_color_hex
 from utils.common_utils import embed_settings_popup, save_workbook_atomic
+from processors.carbonate.step6_normalization import split_into_sessions
 
 # --- Helper Functions ---
 
@@ -37,6 +39,8 @@ def extract_run_number(identifier):
 def _get_valid_co2_rows(rows_identifiers):
     """
     CO2 Logic: Skip R1, keep lowest minor for R2+.
+    Runs written without any rN are each their own run and all kept, as in
+    step6_normalization.py: collapsing them would keep only the first.
     Returns indices of valid rows.
     """
     valid_indices = set()
@@ -55,7 +59,10 @@ def _get_valid_co2_rows(rows_identifiers):
         
         major, minor = extract_run_number(ident_clean)
         
-        if major is None or major == 1:
+        if major is None:
+            valid_indices.add(i)
+            continue
+        if major == 1:
             continue
             
         if major not in seen_majors:
@@ -70,26 +77,28 @@ def _get_valid_co2_rows(rows_identifiers):
         
     return valid_indices
 
+# Column M of the grouped layout carries step 1's peak-count flag, e.g.
+# "> 11: 18" or "< 11: 5": the run had more or fewer than the expected 11
+# peaks, which makes it unreliable (same rule as step6_normalization.py).
+PEAK_FLAG_DEST_COL = 13
+PEAK_FLAG_RE = re.compile(r"^[<>]\s*\d+\s*:\s*\d+$")
+
+def has_peak_count_flag(value):
+    """True for a red "> 11: 18" / "< 11: 5" peak-count flag."""
+    if value is None:
+        return False
+    return bool(PEAK_FLAG_RE.match(str(value).strip()))
+
 def get_material_colors(material_name, ref_materials):
     """
     Returns (ID_Font, Summary_Font) based on material settings.
     ID_Font: Color, No Bold (for Col C).
     Summary_Font: Color, Bold (for Stats).
     """
-    COLOR_MAP = {
-        "green": "008000",      # Dark Green for Text
-        "red": "FF0000",        # Red
-        "blue": "0000FF",       # Blue
-        "lightblue": "00CCFF",  # Cyan-ish
-        "darkblue": "00008B",   # Dark Blue
-        "orange": "FF9900",     # Orange
-        "yellow": "CCCC00",     # Darker Yellow for visibility
-    }
     
     for mat in ref_materials:
         if mat.get("col_c") == material_name:
-            c_name = mat.get("color", "").lower()
-            hex_font = COLOR_MAP.get(c_name, "000000")
+            hex_font = material_color_hex(mat.get("color"))
             
             # Font for ID Column: Color only, NO Bold
             id_font_obj = Font(bold=False, color=hex_font)
@@ -192,6 +201,7 @@ def step5_group_carbonate(file_path: str):
     col_C_meas = 11 # K
     col_O_meas = 14 # N
     col_id_dest = 3 
+    src_flag_col = next((s for s, d in col_map.items() if d == PEAK_FLAG_DEST_COL), None)
 
     # --- 4. Headers (Initial Copy) ---
     src_header_row = list(source_ws[1])
@@ -269,7 +279,13 @@ def step5_group_carbonate(file_path: str):
         if is_reference_group(k_str):
             refs_list.append((base_key, row_indices))
         else:
-            samples_list.append((base_key, row_indices))
+            # A sample re-measured under the same name (A r1-r3 on DAY 12,
+            # again on DAY 9, ...) gets one group per session, kept together.
+            for session_rows in split_into_sessions(
+                    row_indices,
+                    ident_of=lambda r: source_ws_vals.cell(row=r, column=3).value,
+                    time_of=lambda r: source_ws_vals.cell(row=r, column=2).value):
+                samples_list.append((base_key, session_rows))
 
     # --- 6. Process Groups Loop (Phase 1 -> Separator -> Phase 2) ---
     dest_row = 2 
@@ -326,6 +342,13 @@ def step5_group_carbonate(file_path: str):
                 is_co2_group = True
                 valid_indices_set = _get_valid_co2_rows(group_identifiers)
 
+            flagged_indices = {
+                i for i, r in enumerate(row_indices)
+                if src_flag_col and has_peak_count_flag(source_ws_vals.cell(row=r, column=src_flag_col).value)
+            }
+            # A flagged CO2 run loses its grey "chosen" fill too, as in step 6.
+            valid_indices_set = set(valid_indices_set) - flagged_indices
+
             # C. Write Rows
             group_dest_rows = [] 
             
@@ -349,6 +372,13 @@ def step5_group_carbonate(file_path: str):
                     # Material Styling for ID (Font Only)
                     if dest_c == col_id_dest and id_font:
                         dest_cell.font = id_font
+
+                    # Flagged runs: values struck in their own colour, so they
+                    # read differently from a red sigma outlier.
+                    if i in flagged_indices and dest_c in (col_C_meas, col_O_meas):
+                        struck = copy(dest_cell.font)
+                        struck.strike = True
+                        dest_cell.font = struck
                 
                     # Ensure Meas cols have gray background
                     if not (is_co2_group and is_valid_run_idx):
@@ -363,7 +393,7 @@ def step5_group_carbonate(file_path: str):
             valid_run_row_indices = [] # Indices relative to the group list
 
             for i in range(len(group_dest_rows)):
-                if is_co2_group and i not in valid_indices_set:
+                if (is_co2_group and i not in valid_indices_set) or i in flagged_indices:
                     c_vals.append(None)
                     o_vals.append(None)
                 else:

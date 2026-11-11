@@ -22,6 +22,7 @@ import matplotlib.dates as mdates
 
 from PyQt6.QtCore import QThread, pyqtSignal
 import utils.settings as settings
+from utils.colors import material_color_hex, next_material_color
 from utils.common_utils import save_workbook_atomic
 from utils.excel_engine import ExcelEngine, set_shared_engine, clear_shared_engine
 
@@ -205,7 +206,7 @@ class CarbonateCombineWorker(QThread):
                             local_list.append({
                                 "col_c": f_ref,
                                 "col_d": "", "col_e": "", "col_f": "", "col_g": "", "col_h": "",
-                                "color": "black"
+                                "color": next_material_color(local_list)
                             })
                     return local_list
 
@@ -376,11 +377,6 @@ class CarbonateCombineWorker(QThread):
             grey_fill = openpyxl.styles.PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
             black_font = openpyxl.styles.Font(bold=True, color="000000")
             
-            color_hex_map = {
-                "red": "FF0000", "blue": "0000FF", "darkblue": "00008B", 
-                "orange": "E46C0A", "green": "00B050", "lightblue": "5DADE2", 
-                "black": "000000"
-            }
 
             # =======================================================
             # COMPILATION: CHRONOLOGICAL INJECTION & GRAPH REBUILDING
@@ -402,7 +398,7 @@ class CarbonateCombineWorker(QThread):
                 for std in ref_settings:
                     if std.get("col_c") == mat_name:
                         c_name = std.get("color", "black").lower()
-                        mat_color = color_hex_map.get(c_name, "000000")
+                        mat_color = material_color_hex(c_name)
                         break
                 
                 if is_new_sheet and files_data_list and files_data_list[0]['data_header']:

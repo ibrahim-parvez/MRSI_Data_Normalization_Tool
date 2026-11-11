@@ -4,120 +4,307 @@ from PyQt6.QtWidgets import (
     QLabel, QFileDialog, QTabWidget, QTextEdit, QCheckBox,
     QLineEdit, QComboBox, QGroupBox, QMessageBox, QMenu, QProgressBar, QFrame,
     QSizePolicy, QSpacerItem, QGridLayout, QTabBar, QDialog, QScrollArea, QButtonGroup, 
-    QRadioButton, QListWidget, QAbstractItemView, QTableWidget, QTableWidgetItem, QHeaderView, QLayout,
+    QRadioButton, QListWidget, QListWidgetItem, QAbstractItemView, QTableWidget, QTableWidgetItem, QHeaderView, QLayout,
     QToolTip, QStyleOptionGroupBox, QProgressDialog, QLabel, QStyle, QDoubleSpinBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPoint, QRect, QSize, QPropertyAnimation, QEasingCurve, QByteArray, QUrl
 
+import os
+from datetime import datetime
+
 import utils.settings as settings
 import gui.main_window as main_window
 
+# --- Settings history ------------------------------------------------------
+# Friendly names for the settings a person would recognise from this tab.
+_SETTING_LABELS = {
+    "STDEV_THRESHOLD_ENABLED": "Stdev highlighting",
+    "STDEV_THRESHOLD": "Stdev threshold",
+    "OUTLIER_SIGMA": "Outlier limit",
+    "OUTLIER_EXCLUSION_MODE": "Outlier exclusion",
+    "CALC_MODE_STEP3": "Step 3 calculation",
+    "CALC_MODE_STEP7": "Step 7 report values",
+    "ENABLE_FREEZE_PANE": "Freeze pane",
+    "CO2_TEMP_MODE": "CO₂ temperature profile",
+    "CO2_CUSTOM_LABEL": "CO₂ custom label",
+    "CALC_CARBONATE": "Carbonate block",
+    "CALC_YIELD": "Yield block",
+    "CALC_CO2": "CO₂ block",
+    "BLOCK_ORDER": "Block order",
+    "YIELD_COMPOUNDS": "Yield compounds",
+}
+# Per-file choices made on the Water/Carbonate tabs, not settings.
+_SKIPPED_SETTINGS = {"ACTIVE_REFERENCES", "ACTIVE_SAMPLES"}
+_TYPE_ORDER = ["Carbonate", "Water", "CO2", "Yield"]
+_TYPE_NAMES = {"CO2": "CO₂"}
+_FIELD_LABELS = {
+    "Carbonate": {"col_f": "δ¹³C", "col_g": "δ¹⁸O"},
+    "Water": {"col_f": "δ²H", "col_g": "δ¹⁸O"},
+    "CO2": {"col_f": "δ¹³C", "col_g": "δ¹⁸O CO₂"},
+}
+
+
+def _fmt(key, value):
+    if value is None or value == "" or value == []:
+        return "—"
+    if isinstance(value, bool):
+        return "On" if value else "Off"
+    if key == "OUTLIER_SIGMA":
+        return f"{value}σ"
+    if key == "BLOCK_ORDER" and isinstance(value, list):
+        return " → ".join(map(str, value))
+    if key == "YIELD_COMPOUNDS" and isinstance(value, dict):
+        return f"RM {value.get('ref', '?')}, samples {value.get('samp', '?')}"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _sorted_types(*dicts):
+    names = set()
+    for d in dicts:
+        names.update((d or {}).keys())
+    return sorted(names, key=lambda t: (_TYPE_ORDER.index(t) if t in _TYPE_ORDER else 99, t))
+
+
+def describe_settings_diff(saved, current):
+    """Rows of (section, setting, value in the save, value now) for
+    everything that differs, in plain words."""
+    rows = []
+    saved, current = saved or {}, current or {}
+
+    for key in sorted(set(saved) | set(current),
+                      key=lambda k: (list(_SETTING_LABELS).index(k) if k in _SETTING_LABELS else 99, k)):
+        if key in _SKIPPED_SETTINGS or key in ("REFERENCE_MATERIALS", "SLOPE_INTERCEPT_GROUPS"):
+            continue
+        a, b = saved.get(key), current.get(key)
+        if a != b:
+            label = _SETTING_LABELS.get(key, key.replace("_", " ").capitalize())
+            rows.append(("General", label, _fmt(key, a), _fmt(key, b)))
+
+    mats_a = saved.get("REFERENCE_MATERIALS") or {}
+    mats_b = current.get("REFERENCE_MATERIALS") or {}
+    for mtype in _sorted_types(mats_a, mats_b):
+        tname = _TYPE_NAMES.get(mtype, mtype)
+        by_a = {m.get("col_c"): m for m in mats_a.get(mtype, []) if m.get("col_c")}
+        by_b = {m.get("col_c"): m for m in mats_b.get(mtype, []) if m.get("col_c")}
+        labels = _FIELD_LABELS.get(mtype, {})
+        section = f"{tname} reference materials"
+        for name in list(by_a) + [n for n in by_b if n not in by_a]:
+            if name not in by_b:
+                rows.append((section, name, "In the table", "Removed"))
+            elif name not in by_a:
+                rows.append((section, name, "Not in the table", "Added"))
+            else:
+                for field in ("col_d", "col_e", "col_f", "col_g", "col_h", "color"):
+                    va, vb = by_a[name].get(field, ""), by_b[name].get(field, "")
+                    if str(va) != str(vb):
+                        flabel = labels.get(field, "Color" if field == "color" else f"Col {field[-1].upper()}")
+                        rows.append((section, f"{name} · {flabel}", _fmt(field, va), _fmt(field, vb)))
+
+    groups_a = saved.get("SLOPE_INTERCEPT_GROUPS") or {}
+    groups_b = current.get("SLOPE_INTERCEPT_GROUPS") or {}
+    for gtype in _sorted_types(groups_a, groups_b):
+        ga, gb = groups_a.get(gtype, []), groups_b.get(gtype, [])
+        if ga != gb:
+            # One group per line, so long group lists wrap downwards.
+            fmt = lambda gs: "\n".join(" + ".join(g) for g in gs) or "none"
+            rows.append(("Slope groups", _TYPE_NAMES.get(gtype, gtype), fmt(ga), fmt(gb)))
+    return rows
+
+
+def _when(dt):
+    if dt is None:
+        return ""
+    today = datetime.now().date()
+    clock = dt.strftime("%I:%M:%S %p").lstrip("0")
+    if dt.date() == today:
+        return f"Today, {clock}"
+    return f"{dt.strftime('%b')} {dt.day}, {clock}"
+
+
 class ManageSettingsDialog(QDialog):
+    """Settings history: pick a snapshot, see exactly how it differs from the
+    current settings, and restore it. Every restore, reset and import is
+    snapshotted first, so any of them can be undone from the same list."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Manage Settings")
-        self.setFixedSize(400, 300)
-        
+        self.setMinimumSize(760, 480)
+        self.resize(840, 640)  # room for several differences at once
+        # Translucent greys sit well on both the light and the dark theme.
+        self.setStyleSheet("""
+            QFrame#diffCard { background-color: rgba(128, 128, 128, 22);
+                              border: 1px solid rgba(128, 128, 128, 70); border-radius: 6px; }
+            QFrame#diffCard QLabel { background: transparent; border: none; }
+            QLabel#diffSection { color: #808080; font-size: 11px; font-weight: bold; }
+            QLabel#diffKey { color: #808080; }
+        """)
+        self.restored_from = None   # set when the dialog closes after a restore/import
+        self._saves = settings.get_auto_saves()
+        self._current = settings.get_current_settings()
+
         layout = QVBoxLayout(self)
-        
-        # --- Auto-Save Table Section ---
-        layout.addWidget(QLabel("<b>Recent Auto-Saves:</b><br><small>(Created automatically when leaving the settings tab)</small>"))
-        
-        self.table = QTableWidget(0, 1)
-        self.table.setHorizontalHeaderLabels(["Timestamp"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        
-        self.btn_restore = QPushButton("Restore Selected Save")
-        self.btn_restore.setEnabled(False) 
-        self.btn_restore.setCursor(Qt.CursorShape.PointingHandCursor)
-        
-        self.table.itemSelectionChanged.connect(lambda: self.btn_restore.setEnabled(bool(self.table.selectedItems())))
-        self.btn_restore.clicked.connect(self._do_restore)
-        
-        self._load_table()
-        
-        layout.addWidget(self.table)
-        layout.addWidget(self.btn_restore)
-        
-        # Divider
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(divider)
-        
-        # --- Import / Export Section ---
-        layout.addWidget(QLabel("<b>File Operations:</b>"))
-        
-        file_layout = QHBoxLayout()
-        self.btn_export = QPushButton("Export Settings...")
-        self.btn_import = QPushButton("Import Settings...")
-        
-        self.btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_import.setCursor(Qt.CursorShape.PointingHandCursor)
-        
-        file_layout.addWidget(self.btn_export)
-        file_layout.addWidget(self.btn_import)
-        
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
+
+        title = QLabel("Settings History")
+        title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        hint = QLabel("A snapshot is saved whenever you leave Advanced Settings, reset, restore or "
+                      "import. Pick one to see how it differs from your current settings.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #808080;")
+        layout.addWidget(title)
+        layout.addWidget(hint)
+
+        body = QHBoxLayout()
+        body.setSpacing(12)
+
+        self.save_list = QListWidget()
+        self.save_list.setFixedWidth(230)
+        self.save_list.setSpacing(2)
+        self.save_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        for snap in self._saves:
+            n = len(describe_settings_diff(snap["data"], self._current))
+            changes = "same as now" if n == 0 else f"{n} difference{'s' if n != 1 else ''}"
+            item = QListWidgetItem(f"{_when(snap.get('time'))}\n{snap.get('note', 'Auto-save')} · {changes}")
+            self.save_list.addItem(item)
+        body.addWidget(self.save_list)
+
+        right = QVBoxLayout()
+        right.setSpacing(6)
+        self.detail_title = QLabel()
+        self.detail_title.setStyleSheet("font-weight: bold;")
+        right.addWidget(self.detail_title)
+
+        # Differences read top to bottom as cards that wrap, so nothing
+        # ever needs sideways scrolling.
+        self.diff_scroll = QScrollArea()
+        self.diff_scroll.setWidgetResizable(True)
+        self.diff_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.diff_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.diff_body = QWidget()
+        self.diff_layout = QVBoxLayout(self.diff_body)
+        self.diff_layout.setContentsMargins(0, 0, 6, 0)
+        self.diff_layout.setSpacing(6)
+        self.diff_scroll.setWidget(self.diff_body)
+        right.addWidget(self.diff_scroll, 1)
+
+        self.empty_label = QLabel()
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_label.setWordWrap(True)
+        self.empty_label.setStyleSheet("color: #808080; font-style: italic; padding: 30px;")
+        right.addWidget(self.empty_label, 1)
+        body.addLayout(right, 1)
+        layout.addLayout(body, 1)
+
+        buttons = QHBoxLayout()
+        self.btn_export = QPushButton("Export Settings…")
+        self.btn_import = QPushButton("Import Settings…")
         self.btn_export.clicked.connect(self._do_export)
         self.btn_import.clicked.connect(self._do_import)
-        
-        layout.addLayout(file_layout)
-        
-    def _load_table(self):
-        """Populates the table with available auto-saves and adds hover tooltips."""
-        saves = settings.get_auto_saves()
-        self.table.setRowCount(len(saves))
-        for row, timestamp in enumerate(saves):
-            item = QTableWidgetItem(timestamp)
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            try:
-                save_data = settings.get_auto_save_data(row) 
-                
-                if save_data and isinstance(save_data, dict):
-                    tooltip_lines = [f"<b>Preview for {timestamp}:</b><hr>"]
-                    for key, value in save_data.items():
-                        
-                        if key == "REFERENCE_MATERIALS" and isinstance(value, dict):
-                            tooltip_lines.append(f"<b>{key}:</b>")
-                            for mat_type, mat_list in value.items():
-                                names = [m.get("col_c", "Unknown") for m in mat_list if m.get("col_c")]
-                                tooltip_lines.append(f"&nbsp;&nbsp;• <i>{mat_type}:</i> {', '.join(names)}")
-                        
-                        elif key == "SLOPE_INTERCEPT_GROUPS" and isinstance(value, dict):
-                            tooltip_lines.append(f"<b>{key}:</b>")
-                            for mat_type, group_list in value.items():
-                                group_strs = [f"({', '.join(g)})" for g in group_list]
-                                tooltip_lines.append(f"&nbsp;&nbsp;• <i>{mat_type}:</i> {', '.join(group_strs)}")
-                        
-                        elif isinstance(value, list):
-                            tooltip_lines.append(f"<b>{key}:</b> <i>[{len(value)} items]</i>")
-                        elif isinstance(value, dict):
-                            tooltip_lines.append(f"<b>{key}:</b> <i>[{len(value)} properties]</i>")
-                        else:
-                            tooltip_lines.append(f"<b>{key}:</b> {value}")
-                    
-                    item.setToolTip("<br>".join(tooltip_lines))
-                else:
-                    item.setToolTip("<i>No preview data available for this save.</i>")
-            except AttributeError:
-                item.setToolTip("<i>Preview unavailable.<br>Add get_auto_save_data(row) to settings.py.</i>")
-            
-            self.table.setItem(row, 0, item)
-            
-    def _do_restore(self):
-        selected = self.table.selectedItems()
-        if not selected:
+        self.status_label = QLabel()
+        self.status_label.setStyleSheet("color: #808080;")
+        self.btn_close = QPushButton("Close")
+        self.btn_close.setObjectName("clearBtn")  # the app's grey secondary style
+        self.btn_close.clicked.connect(self.reject)
+        self.btn_restore = QPushButton("Restore This Snapshot")
+        self.btn_restore.clicked.connect(self._do_restore)
+        for b in (self.btn_export, self.btn_import, self.btn_close, self.btn_restore):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+        buttons.addWidget(self.btn_export)
+        buttons.addWidget(self.btn_import)
+        buttons.addWidget(self.status_label, 1)
+        buttons.addWidget(self.btn_close)
+        buttons.addWidget(self.btn_restore)
+        layout.addLayout(buttons)
+
+        self.save_list.currentRowChanged.connect(self._show_snapshot)
+        if self._saves:
+            self.save_list.setCurrentRow(0)
+        else:
+            self._show_snapshot(-1)
+
+    def _clear_diffs(self):
+        while self.diff_layout.count():
+            item = self.diff_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _diff_card(self, label, old, new):
+        card = QFrame()
+        card.setObjectName("diffCard")
+        grid = QGridLayout(card)
+        grid.setContentsMargins(10, 8, 10, 8)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(3)
+        grid.setColumnStretch(1, 1)
+
+        title = QLabel(label)
+        title.setStyleSheet("font-weight: bold;")
+        title.setWordWrap(True)
+        grid.addWidget(title, 0, 0, 1, 2)
+        for r, (key, value, bold) in enumerate((("Snapshot", old, True), ("Current", new, False)), start=1):
+            key_label = QLabel(key)
+            key_label.setObjectName("diffKey")
+            value_label = QLabel(value)
+            value_label.setTextFormat(Qt.TextFormat.PlainText)
+            value_label.setWordWrap(True)
+            value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            if bold:
+                value_label.setStyleSheet("font-weight: bold;")
+            grid.addWidget(key_label, r, 0, Qt.AlignmentFlag.AlignTop)
+            grid.addWidget(value_label, r, 1)
+        return card
+
+    def _show_snapshot(self, row):
+        self._clear_diffs()
+        if not 0 <= row < len(self._saves):
+            self.detail_title.setText("")
+            self.diff_scroll.hide()
+            self.empty_label.setText("No snapshots yet.\n\nOne is saved each time you change something "
+                                     "and leave Advanced Settings.")
+            self.empty_label.show()
+            self.btn_restore.setEnabled(False)
+            self.btn_restore.setToolTip("Nothing to restore yet")
             return
-            
-        row = selected[0].row()
-        if settings.restore_auto_save(row):
-            QMessageBox.information(self, "Restored", "Settings successfully restored from auto-save!")
+
+        snap = self._saves[row]
+        diffs = describe_settings_diff(snap["data"], self._current)
+        self.detail_title.setText(f"{_when(snap.get('time'))} compared with your current settings")
+        if not diffs:
+            self.diff_scroll.hide()
+            self.empty_label.setText("This snapshot is the same as your current settings.")
+            self.empty_label.show()
+            self.btn_restore.setEnabled(False)
+            self.btn_restore.setToolTip("Same as your current settings")
+            return
+
+        self.empty_label.hide()
+        section = None
+        for sec, label, old, new in diffs:
+            if sec != section:
+                section = sec
+                heading = QLabel(sec.upper())
+                heading.setObjectName("diffSection")
+                if self.diff_layout.count():
+                    self.diff_layout.addSpacing(6)
+                self.diff_layout.addWidget(heading)
+            self.diff_layout.addWidget(self._diff_card(label, old, new))
+        self.diff_layout.addStretch(1)
+        self.diff_scroll.verticalScrollBar().setValue(0)
+        self.diff_scroll.show()
+        self.btn_restore.setEnabled(True)
+        self.btn_restore.setToolTip("Bring back the Snapshot values. "
+                                    "Your current settings are snapshotted first.")
+
+    def _do_restore(self):
+        row = self.save_list.currentRow()
+        if 0 <= row < len(self._saves) and settings.restore_auto_save(row):
+            self.restored_from = _when(self._saves[row].get("time"))
             self.accept()
-        
+
     def _do_export(self):
         filepath, _ = QFileDialog.getSaveFileName(
             self, "Export Settings", "MRSI_Settings_Backup.json", "JSON Files (*.json)"
@@ -125,10 +312,10 @@ class ManageSettingsDialog(QDialog):
         if filepath:
             success, msg = settings.export_to_file(filepath)
             if success:
-                QMessageBox.information(self, "Export", msg)
+                self.status_label.setText(f"Exported to {os.path.basename(filepath)}")
             else:
                 QMessageBox.critical(self, "Export Error", msg)
-                
+
     def _do_import(self):
         filepath, _ = QFileDialog.getOpenFileName(
             self, "Import Settings", "", "JSON Files (*.json)"
@@ -136,7 +323,7 @@ class ManageSettingsDialog(QDialog):
         if filepath:
             success, msg = settings.import_from_file(filepath)
             if success:
-                QMessageBox.information(self, "Import", msg)
+                self.restored_from = os.path.basename(filepath)
                 self.accept()
             else:
                 QMessageBox.critical(self, "Import Error", msg)
@@ -420,7 +607,6 @@ class AdvancedSettingsTab(QWidget):
             background-color: #FFFFFF; 
             color: #000000; 
             border: 1px solid #D4D4D4; 
-            font-family: 'Segoe UI', sans-serif;
             font-size: 11px;
         """)
         
@@ -435,7 +621,6 @@ class AdvancedSettingsTab(QWidget):
             background-color: #FFC7CE; 
             color: #9C0006; 
             border: 1px solid #FFC7CE;
-            font-family: 'Segoe UI', sans-serif;
             font-size: 11px;
             font-weight: bold;
         """)
@@ -563,7 +748,6 @@ class AdvancedSettingsTab(QWidget):
             background-color: #FFFFFF; 
             color: #FF0000; 
             border: 1px solid #D4D4D4; 
-            font-family: 'Segoe UI', sans-serif;
             font-size: 11px;
         """)
         
@@ -876,73 +1060,34 @@ class AdvancedSettingsTab(QWidget):
         mode = "Individual" if self.rb_excl_ind.isChecked() else "Exclude Row"
         settings.set_setting("OUTLIER_EXCLUSION_MODE", mode)
 
+    # Settings the Reset button owns. Values come from the defaults in
+    # utils/settings.py, so a reset always matches a fresh launch.
+    _RESET_KEYS = (
+        "STDEV_THRESHOLD_ENABLED", "STDEV_THRESHOLD",
+        "OUTLIER_SIGMA", "OUTLIER_EXCLUSION_MODE",
+        "CALC_MODE_STEP3", "CALC_MODE_STEP7",
+        "REFERENCE_MATERIALS", "SLOPE_INTERCEPT_GROUPS", "YIELD_COMPOUNDS",
+    )
+
     def _reset_to_default(self):
-        self.chk_stdev.setChecked(False)
-        self.input_stdev.setText("0.08") 
-        self._on_stdev_changed()         
-        
-        self.rb_2sigma.setChecked(True)
-        self.rb_excl_ind.setChecked(True)
-        
-        self.rb_s3_last6.setChecked(True)
-        self.rb_s7_all.setChecked(True)
-        
-        default_carb_mats = [
-            {"col_c": "IAEA 603", "col_d": "", "col_e": "", "col_f": "2.46", "col_g": "-2.37", "col_h": "", "color": "green"},
-            {"col_c": "LSVEC",    "col_d": "", "col_e": "", "col_f": "-46.6", "col_g": "-26.7", "col_h": "", "color": "lightblue"},
-            {"col_c": "NBS 18",   "col_d": "", "col_e": "", "col_f": "-5.01", "col_g": "-23.01", "col_h": "", "color": "red"},
-            {"col_c": "NBS 19",   "col_d": "", "col_e": "", "col_f": "1.95",  "col_g": "-2.20",  "col_h": "", "color": "darkblue"}
-        ]
-        default_carb_slopes = [
-            ["NBS 18", "NBS 19"],
-            ["NBS 18", "NBS 19", "IAEA 603"]
-        ]
-        settings.set_setting("REFERENCE_MATERIALS", default_carb_mats, sub_key="Carbonate")
-        settings.set_setting("SLOPE_INTERCEPT_GROUPS", default_carb_slopes, sub_key="Carbonate")
+        settings.auto_save("Before reset")  # undo from Manage Settings
+        settings.reset_to_defaults(self._RESET_KEYS)
+        self._refresh_ui_from_settings()
+        self._toast("Settings reset to default. Undo it from Manage Settings.")
 
-        default_water_mats = [
-            {"col_c": "MRSI-STD-W1", "col_d": "", "col_e": "", "col_f": "-3.52", "col_g": "-0.58", "col_h": "", "color": "red"},
-            {"col_c": "MRSI-STD-W2",  "col_d": "", "col_e": "", "col_f": "-214.79", "col_g": "-28.08", "col_h": "", "color": "darkblue"},
-            {"col_c": "USGS W-67400",  "col_d": "", "col_e": "", "col_f": "1.25", "col_g": "-1.97", "col_h": "", "color": "orange"},
-            {"col_c": "USGS W-64444",  "col_d": "", "col_e": "", "col_f": "-399.1", "col_g": "-51.14", "col_h": "", "color": "green"}
-        ]
-        default_water_slopes = [
-            ["MRSI-STD-W1", "MRSI-STD-W2"],
-            ["USGS W-67400", "USGS W-64444"]
-        ]
-        settings.set_setting("REFERENCE_MATERIALS", default_water_mats, sub_key="Water")
-        settings.set_setting("SLOPE_INTERCEPT_GROUPS", default_water_slopes, sub_key="Water")
-
-        default_co2_mats = [
-            {"col_c": "IAEA 603", "col_d": "", "col_e": "", "col_f": "2.46", "col_g": "7.86", "col_h": "", "color": "green"},
-            {"col_c": "LSVEC",    "col_d": "", "col_e": "", "col_f": "-46.6", "col_g": "", "col_h": "", "color": "lightblue"},
-            {"col_c": "NBS 18",   "col_d": "", "col_e": "", "col_f": "-5.01", "col_g": "-13.00", "col_h": "", "color": "red"},
-            {"col_c": "NBS 19",   "col_d": "", "col_e": "", "col_f": "1.95",  "col_g": "8.03",  "col_h": "", "color": "darkblue"}
-        ]
-        settings.set_setting("REFERENCE_MATERIALS", default_co2_mats, sub_key="CO2")
-        settings.set_setting("SLOPE_INTERCEPT_GROUPS", default_carb_slopes, sub_key="CO2")
-
-        # Yield default configuration matches Carbonate initially
-        default_yield_slopes = [
-            ["NBS 18", "NBS 19"],
-            ["Carrara"]
-        ]
-        settings.set_setting("SLOPE_INTERCEPT_GROUPS", default_yield_slopes, sub_key="Yield")
-        
-        settings.set_setting("YIELD_COMPOUNDS", {"ref": "CaCO3", "samp": "MnCO3"})
-
-        self.carb_widget.load_data()
-        self.water_widget.load_data()
-        self.co2_widget.load_data() 
-        self.yield_widget.load_data()
-        
-        self._check_co2_profile_state()
+    def _toast(self, message):
+        window = self.window()
+        if hasattr(window, "show_toast"):
+            window.show_toast(message)
 
     def _open_manage_settings(self):
         """Opens the dialog and refreshes the UI if settings were imported/loaded."""
+        settings.auto_save()  # the list should include what is on screen now
         dialog = ManageSettingsDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._refresh_ui_from_settings()
+            if dialog.restored_from:
+                self._toast(f"Settings restored from {dialog.restored_from}")
 
     def _refresh_ui_from_settings(self):
         """Pulls the current states from settings.py and forces the UI to match."""
@@ -950,7 +1095,7 @@ class AdvancedSettingsTab(QWidget):
         is_enabled = settings.get_setting("STDEV_THRESHOLD_ENABLED")
         self.chk_stdev.setChecked(bool(is_enabled))
         
-        stdev_val = float(settings.get_setting("STDEV_THRESHOLD") or 0.08)
+        stdev_val = float(settings.get_setting("STDEV_THRESHOLD") or 0.1)
         self.input_stdev.setText(f"{stdev_val:g}")
         self._update_visual_example(stdev_val)
 

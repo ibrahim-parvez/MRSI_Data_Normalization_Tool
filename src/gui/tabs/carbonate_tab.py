@@ -1,11 +1,13 @@
 import openpyxl
 import re
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QLineEdit, 
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QCheckBox, QLineEdit,
     QComboBox, QGroupBox, QFrame, QLabel, QPushButton, QListWidget, QAbstractItemView, QMessageBox, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 import utils.settings as settings
+from utils.colors import next_material_color
+from gui.block_layout_bar import BlockLayoutBar
 
 # =========================================================================
 # BACKGROUND WORKER FOR FETCHING SHEET NAMES
@@ -41,6 +43,8 @@ class SheetFetcherWorker(QThread):
 # =========================================================================
 class CarbonateTab(QWidget):
     references_updated = pyqtSignal()
+    # Anything that changes whether Run can start (steps ticked, blocks on).
+    run_state_changed = pyqtSignal()
     def __init__(self):
         super().__init__()
         self.step_cbs = []
@@ -71,6 +75,10 @@ class CarbonateTab(QWidget):
         self._create_settings_ui()
         self.refresh_step_labels()
 
+        for cb in self.step_cbs + [self.select_all_cb]:
+            cb.toggled.connect(lambda *_: self.run_state_changed.emit())
+        self.block_bar.changed.connect(self.run_state_changed.emit)
+
     def _add_divider(self, layout):
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
@@ -86,7 +94,6 @@ class CarbonateTab(QWidget):
 
         # Top: Select all toggle
         top_row = QHBoxLayout()
-        top_row.addSpacing(10)
         self.select_all_cb = QCheckBox("Select All")
         top_row.addWidget(self.select_all_cb)
         top_row.addStretch()
@@ -142,22 +149,21 @@ class CarbonateTab(QWidget):
         settings_layout = QVBoxLayout()
         settings_group.setLayout(settings_layout)
         
-        # 1. Sheet Name Entry
-        sheet_row = QHBoxLayout()
+        # 1. Sheet name and 2. To Sort filter share a grid, so both inputs
+        # start at the same x whatever the label widths.
+        form = QGridLayout()
+        form.setHorizontalSpacing(10)
+        form.setColumnStretch(1, 1)
         self.sheet_entry = QLineEdit("")
         self.sheet_entry.setPlaceholderText("Sheet name")
-        sheet_row.addWidget(QLabel("<b>Initial Sheet Name:</b>"))
-        sheet_row.addWidget(self.sheet_entry)
-        settings_layout.addLayout(sheet_row)
-        
-        # 2. To Sort Filter
-        filter_row = QHBoxLayout()
         self.filter_combo = QComboBox()
         self.filter_combo.addItems(["All", "Last 6", "Last 6 Outliers Excl.", "Ref Avg", "Start", "End", "Delta"])
         self.filter_combo.setCurrentText("Last 6")
-        filter_row.addWidget(QLabel("<b>To Sort Filter:</b>"))
-        filter_row.addWidget(self.filter_combo)
-        settings_layout.addLayout(filter_row)
+        form.addWidget(QLabel("<b>Initial Sheet Name:</b>"), 0, 0)
+        form.addWidget(self.sheet_entry, 0, 1)
+        form.addWidget(QLabel("<b>To Sort Filter:</b>"), 1, 0)
+        form.addWidget(self.filter_combo, 1, 1)
+        settings_layout.addLayout(form)
 
         # --- Freeze Pane Checkbox ---
         freeze_row = QHBoxLayout()
@@ -169,19 +175,18 @@ class CarbonateTab(QWidget):
         
         self._add_divider(settings_layout)
         
-        # 3. Calculation Toggles
-        toggles_row = QHBoxLayout()
-        self.yield_cb = QCheckBox("Enable Yield Table Calculations")
-        self.co2_cb = QCheckBox("Enable CO2 Table Calculations")
-        self.yield_cb.setChecked(False)
-        self.co2_cb.setChecked(False)
-        
-        toggles_layout = QVBoxLayout()
-        toggles_layout.addWidget(self.yield_cb)
-        toggles_layout.addWidget(self.co2_cb)
-        toggles_row.addLayout(toggles_layout)
-        toggles_row.addStretch()
-        settings_layout.addLayout(toggles_row)
+        # 3. Normalization blocks: which ones run, and in what order
+        settings_layout.addWidget(QLabel("<b>Normalization Blocks</b>"))
+        self.block_bar = BlockLayoutBar()
+        self.block_bar.set_state(
+            settings.get_setting("BLOCK_ORDER"),
+            {
+                "Carbonate": settings.get_setting("CALC_CARBONATE") is not False,
+                "Yield": bool(settings.get_setting("CALC_YIELD")),
+                "CO2": bool(settings.get_setting("CALC_CO2")),
+            },
+        )
+        settings_layout.addWidget(self.block_bar)
         
         self._add_divider(settings_layout)
         
@@ -267,11 +272,10 @@ class CarbonateTab(QWidget):
 
     def fetch_unique_materials(self):
         """Scans the designated sheet for unique materials in the Identifier column."""
-        self._is_fetching = True
-
+        # Refresh is greyed out until a file is loaded; this is only a guard.
         if not self.current_file_path:
-            QMessageBox.warning(self, "No File", "Please select or drop a file first.")
             return
+        self._is_fetching = True
             
         sheet_name = self.sheet_entry.text().strip()
         
@@ -336,8 +340,10 @@ class CarbonateTab(QWidget):
                     wb.close()
                 except Exception:
                     pass
+            # Reset on every path, early returns included: left set, it
+            # silently blocks every later reference sync.
+            self._is_fetching = False
 
-        self._is_fetching = False
         self.sync_references_to_settings()
 
     def refresh_step_labels(self):
@@ -365,6 +371,16 @@ class CarbonateTab(QWidget):
         self.select_all_cb.setChecked(all_checked)
         self.select_all_cb.blockSignals(False)
         
+    def run_blocker(self):
+        """Why Run cannot start from this tab yet, or None. The file itself is
+        checked by the main window."""
+        if not any(cb.isChecked() for cb in self.step_cbs):
+            return "Select at least one step to run"
+        blocks_on = self.block_bar.enabled()
+        if not (blocks_on.get("Carbonate", True) or blocks_on.get("CO2", False)):
+            return "Turn on the Carbonate or CO\u2082 block"
+        return None
+
     def get_run_parameters(self):
         """Returns the base parameters expected by the main UI."""
         steps = {name: cb.isChecked() for name, cb in zip(self.base_step_names, self.step_cbs)}
@@ -379,9 +395,12 @@ class CarbonateTab(QWidget):
 
         settings.set_setting("ENABLE_FREEZE_PANE", self.freeze_pane_cb.isChecked())
         
+        blocks_on = self.block_bar.enabled()
         return {
-            "calc_yield": self.yield_cb.isChecked(),
-            "calc_co2": self.co2_cb.isChecked(),
+            "calc_carbonate": blocks_on.get("Carbonate", True),
+            "calc_yield": blocks_on.get("Yield", False),
+            "calc_co2": blocks_on.get("CO2", False),
+            "block_order": self.block_bar.order(),
             "references": refs,
             "samples": samples
         }
@@ -430,7 +449,7 @@ class CarbonateTab(QWidget):
         for ref in refs_in_ui:
             if is_heco2_exception(ref): continue
             if not self._is_mapped_to_existing(ref, carb_mats):
-                carb_mats.append({"col_c": ref, "col_d": "", "col_e": "", "col_f": "", "col_g": "", "col_h": "", "color": "black", "bold": False})
+                carb_mats.append({"col_c": ref, "col_d": "", "col_e": "", "col_f": "", "col_g": "", "col_h": "", "color": next_material_color(carb_mats), "bold": False})
                 changed_carb = True
                 
         if changed_carb:
@@ -449,7 +468,7 @@ class CarbonateTab(QWidget):
         for ref in refs_in_ui:
             if is_heco2_exception(ref): continue
             if not self._is_mapped_to_existing(ref, co2_mats):
-                co2_mats.append({"col_c": ref, "col_d": "", "col_e": "", "col_f": "", "col_g": "", "col_h": "", "color": "black", "bold": False})
+                co2_mats.append({"col_c": ref, "col_d": "", "col_e": "", "col_f": "", "col_g": "", "col_h": "", "color": next_material_color(co2_mats), "bold": False})
                 changed_co2 = True
                 
         if changed_co2:
